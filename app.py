@@ -385,7 +385,7 @@ QUICK_QUESTIONS = [
 
 def respond(message, chat_history, search_history):
     if not message or message.strip() == "":
-        return "", chat_history, search_history, gr.update()
+        return "", chat_history, search_history, gr.update(), gr.update()
     try:
         intent, source, data = run_query(message)
         answer = generate_answer(message, intent, source, data)
@@ -398,18 +398,16 @@ def respond(message, chat_history, search_history):
     chat_history = list(chat_history or [])
     chat_history.append({"role": "user",      "content": message})
     chat_history.append({"role": "assistant", "content": full_answer})
-    # Update search history state and display
     search_history = list(search_history or [])
     if message not in search_history:
         search_history.insert(0, message)
     search_history = search_history[:10]
     history_md = "\n".join([f"- {h}" for h in search_history])
-    return "", chat_history, search_history, gr.update(value=history_md)
+    return "", chat_history, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md)
 
 def drug_summary(drug_name, chat_history, search_history):
-    """Called when a drug chip button is clicked"""
     if not drug_name:
-        return chat_history, search_history, gr.update()
+        return chat_history, search_history, gr.update(), gr.update()
     try:
         data = query_drug_summary(drug_name)
         answer = generate_drug_summary_answer(drug_name, data)
@@ -424,7 +422,7 @@ def drug_summary(drug_name, chat_history, search_history):
         search_history.insert(0, label)
     search_history = search_history[:10]
     history_md = "\n".join([f"- {h}" for h in search_history])
-    return chat_history, search_history, gr.update(value=history_md)
+    return chat_history, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md)
 
 def click_quick_question(question, chat_history, search_history):
     return respond(question, chat_history, search_history)
@@ -438,19 +436,71 @@ FEATURED_DRUGS = [
 
 with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
-    # ── Header ────────────────────────────────────────────────
-    gr.HTML("""
-    <div style="background: linear-gradient(135deg, #1a5276, #2e86c1);
-                padding: 24px; border-radius: 10px;
-                margin-bottom: 16px; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 26px;">
-            💊 Netrisyl Pharmacy Assistant
-        </h1>
-        <p style="color: #aed6f1; margin: 6px 0 0 0; font-size: 14px;">
-            Powered by Neo4j Knowledge Graph + GPT-4o-mini | Harare, Zimbabwe
-        </p>
-    </div>
-    """)
+    with gr.Row():
+
+        # ── Left sidebar — Drug Lookup ────────────────────────
+        with gr.Column(scale=1):
+            gr.Markdown("### 🔍 Drug Lookup")
+            drug_search = gr.Textbox(
+                placeholder="Type drug name (e.g. amox)...",
+                label="Search"
+            )
+            drug_dropdown = gr.Dropdown(
+                choices=DRUG_NAMES[:20],
+                label="Select drug",
+                interactive=True
+            )
+            drug_lookup_btn = gr.Button("📋 Get Summary", variant="primary", size="sm")
+
+            gr.Markdown("---")
+            gr.Markdown("""
+**Data Sources:**
+- 📦 Inventory & Pricing
+- 🧪 Drug Knowledge Graph
+- ⚠️ Drug Interactions
+- 📅 Batch & Expiry Records
+- 🚚 Supplier Network
+- 💰 Transaction History
+            """)
+
+        # ── Main chat ─────────────────────────────────────────
+        with gr.Column(scale=3):
+            chatbot = gr.Chatbot(
+                label="Pharmacy Assistant",
+                height=480
+            )
+            gr.Markdown("**💊 Quick Drug Lookup:**")
+            with gr.Row():
+                drug_chips = [gr.Button(d, variant="secondary", size="sm")
+                              for d in FEATURED_DRUGS[:5]]
+            with gr.Row():
+                drug_chips2 = [gr.Button(d, variant="secondary", size="sm")
+                               for d in FEATURED_DRUGS[5:]]
+            with gr.Row():
+                msg = gr.Textbox(
+                    placeholder="Ask about stock, prices, interactions, expiry...",
+                    label="",
+                    scale=5
+                )
+                submit = gr.Button("Ask", variant="primary", scale=1)
+            with gr.Row():
+                export_btn  = gr.Button("📥 Export Chat", variant="secondary", scale=1)
+                export_file = gr.File(label="Download", scale=2, visible=False)
+
+        # ── Right sidebar — Questions & History ───────────────
+        with gr.Column(scale=1):
+            gr.Markdown("### 💡 Quick Questions")
+            quick_btns = [gr.Button(q, variant="secondary", size="sm")
+                          for q in QUICK_QUESTIONS]
+
+            gr.Markdown("---")
+            gr.Markdown("### 🕘 Search History")
+            history_dropdown = gr.Dropdown(
+                choices=[],
+                label="Past questions — select to re-ask",
+                interactive=True
+            )
+            history_display = gr.Markdown("*No searches yet*")
 
     with gr.Row():
 
@@ -531,10 +581,17 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     # ── Wire chat input ───────────────────────────────────────
     submit.click(respond,
                  [msg, chatbot, search_history_state],
-                 [msg, chatbot, search_history_state, history_display])
+                 [msg, chatbot, search_history_state, history_dropdown, history_display])
     msg.submit(respond,
                [msg, chatbot, search_history_state],
-               [msg, chatbot, search_history_state, history_display])
+               [msg, chatbot, search_history_state, history_dropdown, history_display])
+
+    # ── Wire history dropdown — re-ask selected question ─────
+    history_dropdown.change(
+        fn=lambda q, h, s: respond(q, h, s) if q else ("", h, s, gr.update(), gr.update()),
+        inputs=[history_dropdown, chatbot, search_history_state],
+        outputs=[msg, chatbot, search_history_state, history_dropdown, history_display]
+    )
 
     # ── Wire quick question buttons ───────────────────────────
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
@@ -542,7 +599,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             fn=click_quick_question,
             inputs=[gr.Textbox(value=question, visible=False),
                     chatbot, search_history_state],
-            outputs=[msg, chatbot, search_history_state, history_display]
+            outputs=[msg, chatbot, search_history_state, history_dropdown, history_display]
         )
 
     # ── Wire drug chip buttons ────────────────────────────────
@@ -553,7 +610,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             fn=drug_summary,
             inputs=[gr.Textbox(value=drug_name, visible=False),
                     chatbot, search_history_state],
-            outputs=[chatbot, search_history_state, history_display]
+            outputs=[chatbot, search_history_state, history_dropdown, history_display]
         )
 
     # ── Wire drug search & lookup ─────────────────────────────
@@ -561,7 +618,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     drug_lookup_btn.click(
         fn=drug_summary,
         inputs=[drug_dropdown, chatbot, search_history_state],
-        outputs=[chatbot, search_history_state, history_display]
+        outputs=[chatbot, search_history_state, history_dropdown, history_display]
     )
 
     # ── Wire export ───────────────────────────────────────────
