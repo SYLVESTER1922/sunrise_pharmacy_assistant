@@ -57,6 +57,39 @@ def get_all_drugs():
 
 DRUG_NAMES = get_all_drugs()
 
+# ── Fuzzy drug name matcher ───────────────────────────────────
+from difflib import SequenceMatcher
+
+def fuzzy_match_drug(text, threshold=75):
+    text = text.lower().strip()
+    best_score = 0
+    best_match = None
+    for drug in DRUG_NAMES:
+        if text in drug.lower() or drug.lower() in text:
+            return drug
+        score = SequenceMatcher(None, text, drug.lower()).ratio() * 100
+        if score > best_score:
+            best_score = score
+            best_match = drug
+    if best_score >= threshold:
+        return best_match
+    return None
+
+def fuzzy_correct_question(question):
+    words = question.replace("?", "").split()
+    corrections = []
+    corrected_words = list(words)
+    for i, word in enumerate(words):
+        if len(word) < 4:
+            continue
+        match = fuzzy_match_drug(word, threshold=78)
+        if match and match.lower() != word.lower():
+            corrected_words[i] = match
+            corrections.append(f"'{word}' -> '{match}'")
+    corrected = " ".join(corrected_words)
+    note = f"*(Auto-corrected: {', '.join(corrections)})*" if corrections else ""
+    return corrected, note
+
 # ── Intent classification ─────────────────────────────────────
 GREETINGS = ["hi", "hey", "hello", "good morning", "good afternoon",
              "good evening", "help", "what can you do", "how are you"]
@@ -100,40 +133,8 @@ def extract_drug_name(question):
 
 # ── SQLite queries ────────────────────────────────────────────
 def query_stock_price(question):
-    q = question.lower()
-    # Category browse — "list antibiotics", "show antiretrovirals" etc
-    categories = ["antibiotics", "analgesics", "antihypertensives",
-                  "antidiabetics", "antimalarials", "vitamins",
-                  "antifungals", "gastrointestinal", "respiratory",
-                  "antiretrovirals", "gi medications"]
-    for cat in categories:
-        if cat in q:
-            sql = f"""
-                SELECT generic_name, brand_name, quantity_in_stock,
-                       selling_price_usd, shelf_location, category
-                FROM inventory
-                WHERE LOWER(category) LIKE '%{cat}%'
-                AND quantity_in_stock > 0
-                ORDER BY generic_name
-            """
-            with get_conn() as conn:
-                return pd.read_sql_query(sql, conn).to_dict("records")
-    # Count query — "how many drugs", "how many types"
-    if any(w in q for w in ["how many", "count", "total drugs", "drug types"]):
-        sql = """
-            SELECT category, COUNT(*) as count,
-                   SUM(quantity_in_stock) as total_units
-            FROM inventory
-            GROUP BY category
-            ORDER BY category
-        """
-        with get_conn() as conn:
-            return pd.read_sql_query(sql, conn).to_dict("records")
-    # Default — search by drug name
     keywords = extract_drug_name(question)
     parts = keywords.split()
-    if not parts:
-        return []
     conditions = " OR ".join(
         [f"LOWER(generic_name) LIKE '%{p}%' OR LOWER(brand_name) LIKE '%{p}%'"
          for p in parts]
@@ -182,20 +183,6 @@ def query_alternative(question):
     """
     with get_conn() as conn:
         return pd.read_sql_query(sql, conn).to_dict("records")
-        
-def query_symptom(question):
-    keywords = extract_drug_name(question)
-    parts = keywords.split()
-    search = ' '.join(parts)
-    cypher = """
-        MATCH (d:Drug)-[:IN_CATEGORY]->(c:Category)
-        WHERE any(word IN $words WHERE toLower(d.indications) CONTAINS word)
-        RETURN d.generic_name AS name, d.indications AS indications,
-               d.adult_dose AS adult_dose, c.name AS category
-        LIMIT 5
-    """
-    with driver.session() as session:
-        return [dict(r) for r in session.run(cypher, words=parts)]
 
 def query_expiry(question):
     if any(w in question.lower() for w in
@@ -316,13 +303,6 @@ def run_query(question):
         return intent, "transaction records",              query_sales(question)
     elif intent == "alternative":
         return intent, "inventory database",               query_alternative(question)
-    elif any(w in q for w in ["flu", "fever", "pain", "cough", "malaria",
-                                "diabetes", "hypertension", "infection",
-                                "headache", "diarrhea", "stomach"]):
-        return "symptom"
-        
-    elif intent == "symptom":
-        return intent, "drug knowledge graph", query_symptom(question)
     else:
         return intent, "drug knowledge graph",             query_neo4j_drug_info(question)
 
@@ -345,18 +325,21 @@ def generate_answer(question, intent, source, data):
     if not data:
         return ("I could not find any information matching your question. "
                 "Please check the drug name and try again.")
-    system_prompt = """You are a helpful pharmacy assistant at Sunrise Pharmacy
-in Harare, Zimbabwe. Answer questions for pharmacy staff clearly and concisely.
+    system_prompt = """You are a pharmacy assistant at Sunrise Pharmacy in Harare, Zimbabwe.
+Answer ONLY using the structured data provided below. Never add facts from general knowledge.
 Rules:
 - Answer in 3-5 sentences maximum
-- Always mention the data source
-- For drug interactions, always state the severity level
-- For stock questions, mention if stock is near reorder level
+- Stick strictly to the question asked — do not volunteer unrelated information
+- Always mention the data source at the end
+- For drug interactions, always state the severity level (Minor/Moderate/Major)
+- For stock questions, state exact quantity and mention if at or below reorder level
 - For expiry questions, flag anything expiring within 30 days as URGENT
 - For alternatives, list available options with stock levels
-- Never make up information not in the data
-- The transactions data covers the LAST 30 DAYS not a single day — never say "daily sales"
-- Use simple language suitable for pharmacy staff"""
+- The transactions data covers the LAST 30 DAYS — never describe it as daily sales
+- If the data does not contain enough information to answer, say exactly:
+  "I don't have enough data to answer that. Please consult a pharmacist or reference guide."
+- Never guess, infer, or hallucinate any drug names, doses, interactions, or facts
+- Use simple professional language suitable for pharmacy staff"""
     user_prompt = f"""
 Question: {question}
 Intent: {intent}
@@ -424,9 +407,17 @@ def respond(message, chat_history, search_history):
     if not message or message.strip() == "":
         return "", chat_history, search_history, gr.update(), gr.update()
     try:
-        intent, source, data = run_query(message)
-        answer = generate_answer(message, intent, source, data)
-        full_answer = answer if intent == "greeting" else f"{answer}\n\n*Source: {source} | Intent: {intent}*"
+        # Apply fuzzy spelling correction
+        corrected_message, correction_note = fuzzy_correct_question(message)
+        intent, source, data = run_query(corrected_message)
+        answer = generate_answer(corrected_message, intent, source, data)
+        if intent == "greeting":
+            full_answer = answer
+        else:
+            full_answer = answer
+            if correction_note:
+                full_answer = f"{correction_note}\n\n{answer}"
+            full_answer = f"{full_answer}\n\n*Source: {source} | Intent: {intent}*"
     except Exception as e:
         full_answer = f"Error: {str(e)}"
     chat_history = list(chat_history or [])
@@ -471,7 +462,7 @@ def reask_from_history(selected_question, chat_history, search_history):
 FEATURED_DRUGS = [
     "Amoxicillin", "Paracetamol", "Metformin", "Ibuprofen",
     "Ciprofloxacin", "Azithromycin", "Amlodipine", "Losartan",
-    "Artemether/Lumefantrine", "Co-trimoxazole"
+    "Artemether/Lumefantrine", "Cotrimoxazole"
 ]
 
 QUICK_QUESTIONS = [
@@ -488,15 +479,20 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     # Header
     gr.HTML("""
-    <div style="background: linear-gradient(135deg, #1a5276, #2e86c1);
-                padding: 24px; border-radius: 10px;
-                margin-bottom: 16px; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 26px;">
-            💊 Netrisyl Pharmacy Assistant
-        </h1>
-        <p style="color: #aed6f1; margin: 6px 0 0 0; font-size: 14px;">
-            Powered by Neo4j Knowledge Graph + GPT-4o-mini | Harare, Zimbabwe
-        </p>
+    <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c);
+                padding: 16px 24px; border-radius: 10px; margin-bottom: 16px;
+                display: flex; align-items: center; justify-content: space-between;">
+        <img src="/file=NI_Logo.png"
+             style="height: 70px; object-fit: contain;" alt="Netrisyl Insights"/>
+        <div style="text-align: center; flex: 1;">
+            <h1 style="color: white; margin: 0; font-size: 24px;">
+                💊 Pharmacy Assistant
+            </h1>
+            <p style="color: #aed6f1; margin: 4px 0 0 0; font-size: 13px;">
+                Powered by Neo4j Knowledge Graph + GPT-4o-mini | Harare, Zimbabwe
+            </p>
+        </div>
+        <div style="width: 180px;"></div>
     </div>
     """)
 
@@ -560,22 +556,9 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             )
             history_display = gr.Markdown("*No searches yet*")
 
-   gr.HTML("""
-    <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c);
-                padding: 16px 24px; border-radius: 10px;
-                margin-bottom: 16px;
-                display: flex; align-items: center; justify-content: space-between;">
-        <img src="/file=NI_Logo.png"
-             style="height: 70px; object-fit: contain;" alt="Netrisyl Insights"/>
-        <div style="text-align: center; flex: 1;">
-            <h1 style="color: white; margin: 0; font-size: 24px;">
-                💊 Pharmacy Assistant
-            </h1>
-            <p style="color: #aed6f1; margin: 4px 0 0 0; font-size: 13px;">
-                Powered by Neo4j Knowledge Graph + GPT-4o-mini | Harare, Zimbabwe
-            </p>
-        </div>
-        <div style="width: 180px;"></div>
+    gr.HTML("""
+    <div style="text-align:center; margin-top:16px; color:#7f8c8d; font-size:12px;">
+        Netrisyl Insights · Harare, Zimbabwe · Powered by AI
     </div>
     """)
 
