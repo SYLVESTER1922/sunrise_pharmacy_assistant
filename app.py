@@ -380,7 +380,7 @@ def generate_drug_summary_answer(drug_name, data):
         expiry_alert = f"\n🚨 **URGENT:** Nearest batch expires in {d['days_to_expiry']} days ({d['nearest_expiry']})"
     elif d.get("days_to_expiry"):
         expiry_alert = f"\n📅 Nearest expiry: {d['nearest_expiry']} ({d['days_to_expiry']} days)"
-    return f"""**{d['generic_name']}** ({d['brand_name']}) — {d['formulation']} {d['strength']}
+    return f"""**{d['generic_name']}** ({d['brand_name']})  {d['formulation']} {d['strength']}
 
 | | |
 |---|---|
