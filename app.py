@@ -170,7 +170,7 @@ def query_drug_summary(drug_name):
     with get_conn() as conn:
         return pd.read_sql_query(sql, conn, params=(f"%{drug_name}%",)).to_dict("records")
 
-    def query_symptom(question):
+def query_symptom(question):
     keywords = extract_drug_name(question)
     parts = [w for w in keywords.split() if len(w) > 3]
     if not parts:
