@@ -1,0 +1,10 @@
+supplier_id,supplier_name,contact_person,phone,email,city,lead_time_days,payment_terms
+S001,NatHealth Distributors,Tariro Moyo,+263772100201,tariro.moyo@nathealth.co.zw,Harare,3,30 days EOM
+S002,ZimCare Pharma Wholesale,Rumbidzai Dube,+263772100202,r.dube@zimcarepharma.co.zw,Harare,4,Cash on delivery
+S003,Avondale Medical Supplies,Farai Muchengeti,+263772100203,farai@avondalemedical.co.zw,Harare,2,14 days
+S004,Mashonaland Drug Mart,Melisa Zhou,+263772100204,mzhou@mashdrugmart.co.zw,Harare,5,30 days
+S005,Bulawayo Health Distribution,Nqobile Ncube,+263772100205,nqobile@bhd.co.zw,Bulawayo,6,21 days
+S006,MedAxis Zimbabwe,Tatenda Gomo,+263772100206,tatenda.gomo@medaxis.co.zw,Harare,4,"30% deposit, balance 30 days"
+S007,Sunrise Central Wholesalers,Kudakwashe Chari,+263772100207,kchari@sunrisecentral.co.zw,Harare,3,21 days
+S008,Mutare Pharma Link,Patience Nyika,+263772100208,patience@mutarepharmalink.co.zw,Mutare,7,30 days
+S009,Capital Lifecare Traders,Linda Makoni,+263772100209,lmakoni@capitallifecare.co.zw,Harare,5,60 days
