@@ -560,9 +560,22 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             )
             history_display = gr.Markdown("*No searches yet*")
 
-    gr.HTML("""
-    <div style="text-align:center; margin-top:16px; color:#7f8c8d; font-size:12px;">
-        Netrisyl Insights · Harare, Zimbabwe · Powered by AI
+   gr.HTML("""
+    <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c);
+                padding: 16px 24px; border-radius: 10px;
+                margin-bottom: 16px;
+                display: flex; align-items: center; justify-content: space-between;">
+        <img src="/file=NI_Logo.png"
+             style="height: 70px; object-fit: contain;" alt="Netrisyl Insights"/>
+        <div style="text-align: center; flex: 1;">
+            <h1 style="color: white; margin: 0; font-size: 24px;">
+                💊 Pharmacy Assistant
+            </h1>
+            <p style="color: #aed6f1; margin: 4px 0 0 0; font-size: 13px;">
+                Powered by Neo4j Knowledge Graph + GPT-4o-mini | Harare, Zimbabwe
+            </p>
+        </div>
+        <div style="width: 180px;"></div>
     </div>
     """)
 
