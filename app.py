@@ -347,7 +347,7 @@ Rules:
 - For stock questions, state exact quantity and mention if at or below reorder level
 - For expiry questions, flag anything expiring within 30 days as URGENT
 - For alternatives, list available options with stock levels
-- The transactions data covers the LAST 30 DAYS — never describe it as daily sales
+- The transactions data covers the LAST 30 DAYS, never describe it as daily sales
 - If the data does not contain enough information to answer, say exactly:
   "I don't have enough data to answer that. Please consult a pharmacist or reference guide."
 - Never guess, infer, or hallucinate any drug names, doses, interactions, or facts
