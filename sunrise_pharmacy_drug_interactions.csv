@@ -1,0 +1,37 @@
+interaction_id,drug_a,drug_b,severity,interaction_description,clinical_recommendation
+I001,Ibuprofen,Diclofenac,Major,Concurrent NSAID use markedly increases risk of GI bleeding and renal impairment.,Avoid dual NSAID therapy; use one NSAID only and consider gastroprotection if needed.
+I002,Ibuprofen,Hydrochlorothiazide,Moderate,NSAIDs may reduce antihypertensive/diuretic effect and worsen renal function.,Use lowest NSAID dose briefly; monitor BP and renal function.
+I003,Diclofenac,Enalapril,Moderate,NSAIDs may blunt ACE inhibitor effect and increase risk of kidney injury.,Monitor BP/creatinine; limit NSAID duration.
+I004,Diclofenac,Losartan,Moderate,NSAIDs can reduce ARB efficacy and increase renal risk.,Monitor renal function and blood pressure.
+I005,Tramadol,Codeine/Paracetamol,Major,Combined opioid analgesics increase CNS and respiratory depression risk.,Avoid combination; choose one opioid regimen only.
+I006,Tramadol,Efavirenz,Moderate,"Both can cause dizziness and CNS effects, increasing risk of falls or poor adherence.",Counsel on sedation/dizziness; avoid if symptoms significant.
+I007,Codeine/Paracetamol,Lopinavir/Ritonavir,Moderate,Ritonavir may alter opioid metabolism and increase adverse effects.,Use cautiously; monitor for excess sedation and constipation.
+I008,Amlodipine,Lopinavir/Ritonavir,Moderate,Protease inhibitors may increase amlodipine exposure causing hypotension or edema.,Start low and monitor BP/edema.
+I009,Atenolol,Salbutamol,Moderate,Beta blockers may reduce bronchodilator response and provoke bronchospasm.,Avoid non-essential beta blockers in asthma; monitor symptoms.
+I010,Hydrochlorothiazide,Prednisolone,Moderate,Combination may worsen hypokalemia.,Monitor potassium and symptoms such as cramps or weakness.
+I011,Hydrochlorothiazide,Salbutamol,Moderate,"Both may lower potassium, increasing arrhythmia risk.",Monitor potassium in high-risk patients.
+I012,Metformin,Prednisolone,Moderate,Steroids can raise blood glucose and reduce glycemic control.,Monitor glucose closely; adjust diabetes therapy if needed.
+I013,Glibenclamide,Ciprofloxacin,Moderate,Fluoroquinolones may cause hypo- or hyperglycemia with sulfonylureas.,Monitor blood sugar closely during therapy.
+I014,Gliclazide,Ciprofloxacin,Moderate,Ciprofloxacin can disturb glycemic control with sulfonylureas.,Increase glucose monitoring; counsel on hypo symptoms.
+I015,Metformin,Quinine sulfate,Moderate,"Quinine may enhance hypoglycemia risk, especially with other antidiabetics.",Monitor glucose; educate patient on hypoglycemia symptoms.
+I016,Insulin soluble human,Prednisolone,Moderate,Steroids antagonize insulin effect and may increase dose requirements.,Increase glucose monitoring and titrate insulin as needed.
+I017,Insulin isophane human,Prednisolone,Moderate,Prednisolone can worsen hyperglycemia and raise basal insulin needs.,Monitor fasting glucose and adjust regimen.
+I018,Azithromycin,Efavirenz,Moderate,Both may prolong QT interval in susceptible patients.,Use cautiously in patients with cardiac risk; review ECG history.
+I019,Azithromycin,Lopinavir/Ritonavir,Major,Both can increase QT prolongation and arrhythmia risk.,Avoid if possible; choose alternative antibiotic or monitor closely.
+I020,Fluconazole,Lopinavir/Ritonavir,Major,Combined use may increase lopinavir/ritonavir levels and hepatotoxicity/QT risk.,Monitor liver function and consider alternatives if prolonged therapy is needed.
+I021,Fluconazole,Amlodipine,Moderate,Azoles can raise amlodipine concentrations causing hypotension.,Monitor BP and dizziness; consider dose reduction.
+I022,Ketoconazole,Amlodipine,Major,Strong CYP3A4 inhibition can significantly increase amlodipine exposure.,Avoid combination or use very close BP monitoring.
+I023,Ketoconazole,Lopinavir/Ritonavir,Major,Marked interaction may increase hepatotoxicity and cardiac adverse effects.,Avoid coadministration if possible.
+I024,Omeprazole,Ketoconazole,Moderate,Reduced gastric acidity can lower ketoconazole absorption.,Avoid together or separate with clinical monitoring.
+I025,Metoclopramide,Tramadol,Moderate,Both lower seizure threshold and increase CNS adverse effects.,Use cautiously; avoid in seizure-prone patients.
+I026,Metoclopramide,Codeine/Paracetamol,Moderate,Additive sedation and reduced gut motility may occur.,Use cautiously and monitor for drowsiness/constipation.
+I027,Loperamide,Codeine/Paracetamol,Moderate,Additive constipation and possible CNS effects can occur.,Avoid unnecessary combination and counsel on bowel symptoms.
+I028,Ibuprofen,Prednisolone,Major,Combined therapy increases GI irritation and bleeding risk.,Avoid prolonged combination or add gastroprotection if necessary.
+I029,Diclofenac,Prednisolone,Major,Marked increase in GI ulceration/bleeding risk.,Avoid prolonged combination; monitor for GI symptoms.
+I030,Enalapril,Losartan,Major,Dual renin-angiotensin blockade increases risk of renal impairment and hyperkalemia.,Do not combine routinely; choose one agent.
+I031,Enalapril,Hydrochlorothiazide,Minor,Combination is commonly used but may cause first-dose hypotension.,Monitor BP when starting or up-titrating.
+I032,Losartan,Hydrochlorothiazide,Minor,"Combination is commonly used and may improve BP control, but monitor electrolytes.",Monitor BP and electrolytes.
+I033,Atenolol,Amlodipine,Moderate,Additive BP-lowering and bradycardic effects may occur.,Monitor pulse and blood pressure.
+I034,Ciprofloxacin,Quinine sulfate,Major,Both may prolong QT interval and increase arrhythmia risk.,Avoid together when possible; monitor for palpitations.
+I035,Ceftriaxone,Calcium carbonate/Vitamin D3,Minor,Calcium may interfere with some formulations/routes; separation is prudent in practice settings.,Separate administration times and review IV use precautions.
+I036,Ferrous sulfate/Folic acid,Ciprofloxacin,Moderate,Iron can reduce ciprofloxacin absorption.,Separate doses by at least 2-4 hours.
