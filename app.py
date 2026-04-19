@@ -4,6 +4,7 @@ import pandas as pd
 import gradio as gr
 from neo4j import GraphDatabase
 from openai import OpenAI
+from difflib import SequenceMatcher
 import json
 from datetime import datetime
 
@@ -17,7 +18,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ── Build SQLite from CSVs ────────────────────────────────────
+# ── Build SQLite from CSVs on startup ────────────────────────
 DB_PATH = "sunrise_pharmacy.db"
 
 def build_database():
@@ -43,11 +44,11 @@ def build_database():
 
 build_database()
 
-# ── Thread-safe connection ────────────────────────────────────
+# ── Thread-safe SQLite connection ─────────────────────────────
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
-# ── Load drug list for suggestions ───────────────────────────
+# ── Load drug list for suggestions & fuzzy matching ──────────
 def get_all_drugs():
     with get_conn() as conn:
         df = pd.read_sql_query(
@@ -58,24 +59,30 @@ def get_all_drugs():
 DRUG_NAMES = get_all_drugs()
 
 # ── Fuzzy drug name matcher ───────────────────────────────────
-from difflib import SequenceMatcher
-
-def fuzzy_match_drug(text, threshold=75):
+def fuzzy_match_drug(text, threshold=78):
+    """
+    Returns the closest matching drug name from inventory.
+    Handles spelling errors by using character-level similarity.
+    """
     text = text.lower().strip()
     best_score = 0
     best_match = None
     for drug in DRUG_NAMES:
+        # Fast path — direct substring match
         if text in drug.lower() or drug.lower() in text:
             return drug
         score = SequenceMatcher(None, text, drug.lower()).ratio() * 100
         if score > best_score:
             best_score = score
             best_match = drug
-    if best_score >= threshold:
-        return best_match
-    return None
+    return best_match if best_score >= threshold else None
 
 def fuzzy_correct_question(question):
+    """
+    Scans each word in the question and corrects likely drug name
+    misspellings using fuzzy matching against the inventory.
+    Returns (corrected_question, correction_note)
+    """
     words = question.replace("?", "").split()
     corrections = []
     corrected_words = list(words)
@@ -133,8 +140,39 @@ def extract_drug_name(question):
 
 # ── SQLite queries ────────────────────────────────────────────
 def query_stock_price(question):
+    q = question.lower()
+    # Category browse — "list antibiotics", "show antihypertensives" etc
+    categories = ["antibiotics", "analgesics", "antihypertensives",
+                  "antidiabetics", "antimalarials", "vitamins",
+                  "antifungals", "gi medications", "respiratory",
+                  "antiretrovirals"]
+    for cat in categories:
+        if cat in q:
+            sql = f"""
+                SELECT generic_name, brand_name, quantity_in_stock,
+                       selling_price_usd, shelf_location, category
+                FROM inventory
+                WHERE LOWER(category) LIKE '%{cat}%'
+                AND quantity_in_stock > 0
+                ORDER BY generic_name
+            """
+            with get_conn() as conn:
+                return pd.read_sql_query(sql, conn).to_dict("records")
+    # Count query
+    if any(w in q for w in ["how many", "count", "total drugs", "drug types"]):
+        sql = """
+            SELECT category, COUNT(*) as count,
+                   SUM(quantity_in_stock) as total_units
+            FROM inventory
+            GROUP BY category ORDER BY category
+        """
+        with get_conn() as conn:
+            return pd.read_sql_query(sql, conn).to_dict("records")
+    # Default — search by drug name
     keywords = extract_drug_name(question)
     parts = keywords.split()
+    if not parts:
+        return []
     conditions = " OR ".join(
         [f"LOWER(generic_name) LIKE '%{p}%' OR LOWER(brand_name) LIKE '%{p}%'"
          for p in parts]
@@ -149,6 +187,7 @@ def query_stock_price(question):
         return pd.read_sql_query(sql, conn).to_dict("records")
 
 def query_drug_summary(drug_name):
+    """Full summary card: stock + price + nearest expiry"""
     sql = """
         SELECT i.generic_name, i.brand_name, i.formulation, i.strength,
                i.quantity_in_stock, i.reorder_level,
@@ -159,20 +198,13 @@ def query_drug_summary(drug_name):
         FROM inventory i
         LEFT JOIN batches b ON i.product_id = b.product_id
         WHERE LOWER(i.generic_name) LIKE LOWER(?)
-        GROUP BY i.product_id
-        LIMIT 1
+        GROUP BY i.product_id LIMIT 1
     """
     with get_conn() as conn:
         return pd.read_sql_query(sql, conn, params=(f"%{drug_name}%",)).to_dict("records")
 
-def handle_unknown(question):
-    """
-    Catches questions the chatbot cannot safely answer.
-    Returns a safe redirect message instead of guessing.
-    """
-    return []
-        
 def query_alternative(question):
+    """Find drugs in the same category"""
     keywords = extract_drug_name(question)
     parts = keywords.split()
     search = parts[0] if parts else keywords
@@ -314,7 +346,7 @@ def run_query(question):
         return intent, "drug knowledge graph",             query_neo4j_drug_info(question)
 
 # ── GPT-4o-mini answer generator ──────────────────────────────
-GREETING_RESPONSE = """👋 Hello! I'm the Netrisyl Pharmacy Assistant. I can help you with:
+GREETING_RESPONSE = """👋 Hello! I am the Netrisyl Pharmacy Assistant. I can help you with:
 
 - 📦 **Stock & Prices** — *"Do we have amoxicillin in stock?"*
 - ⚠️ **Drug Interactions** — *"What interacts with metformin?"*
@@ -323,10 +355,9 @@ GREETING_RESPONSE = """👋 Hello! I'm the Netrisyl Pharmacy Assistant. I can he
 - 💊 **Drug Information** — *"What is ibuprofen used for?"*
 - 🔄 **Alternatives** — *"What is an alternative to amoxicillin?"*
 - 💰 **Sales Summary** — *"What are the top selling drugs?"*
+- 📋 **Category Browse** — *"List all antibiotics in stock"*
 
 ⚠️ **Note:** Please ask questions by drug name. For symptom-based or clinical recommendations, consult a qualified pharmacist.
-
-Click a drug chip for a quick summary, or use the Drug Lookup on the left. How can I help?"""
 
 Click a drug chip for a quick summary, or use the Drug Lookup on the left. How can I help?"""
 
@@ -335,19 +366,20 @@ def generate_answer(question, intent, source, data):
         return GREETING_RESPONSE
     if not data:
         return ("I could not find any information matching your question. "
-                "Please search by drug name (e.g. 'Do we have Amoxicillin?' or 'What interacts with Metformin?'). "
+                "Please search by drug name (e.g. 'Do we have Amoxicillin?' "
+                "or 'What interacts with Metformin?'). "
                 "For symptom-based recommendations, please consult a qualified pharmacist.")
     system_prompt = """You are a pharmacy assistant at Sunrise Pharmacy in Harare, Zimbabwe.
-Answer ONLY using the structured data provided below. Never add facts from general knowledge.
+Answer ONLY using the structured data provided. Never add facts from general knowledge.
 Rules:
 - Answer in 3-5 sentences maximum
-- Stick strictly to the question asked, do not volunteer unrelated information
+- Stick strictly to the question asked — do not volunteer unrelated information
 - Always mention the data source at the end
 - For drug interactions, always state the severity level (Minor/Moderate/Major)
 - For stock questions, state exact quantity and mention if at or below reorder level
 - For expiry questions, flag anything expiring within 30 days as URGENT
 - For alternatives, list available options with stock levels
-- The transactions data covers the LAST 30 DAYS, never describe it as daily sales
+- The transactions data covers the LAST 30 DAYS — never describe it as daily sales
 - If the data does not contain enough information to answer, say exactly:
   "I don't have enough data to answer that. Please consult a pharmacist or reference guide."
 - Never guess, infer, or hallucinate any drug names, doses, interactions, or facts
@@ -357,7 +389,7 @@ Question: {question}
 Intent: {intent}
 Source: {source}
 Data: {json.dumps(data, indent=2)}
-Answer using only the data provided.
+Answer using only the data provided above.
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -371,16 +403,20 @@ Answer using only the data provided.
     return response.choices[0].message.content
 
 def generate_drug_summary_answer(drug_name, data):
+    """Structured summary card for drug chip / lookup"""
     if not data:
-        return f"I could not find **{drug_name}** in the inventory."
+        return (f"I could not find **{drug_name}** in the inventory. "
+                "Please check the spelling or use the Drug Lookup search box.")
     d = data[0]
     stock_status = "⚠️ LOW STOCK" if d["quantity_in_stock"] <= d["reorder_level"] else "✅ In Stock"
     expiry_alert = ""
     if d.get("days_to_expiry") and d["days_to_expiry"] <= 30:
-        expiry_alert = f"\n🚨 **URGENT:** Nearest batch expires in {d['days_to_expiry']} days ({d['nearest_expiry']})"
+        expiry_alert = (f"\n🚨 **URGENT:** Nearest batch expires in "
+                        f"{d['days_to_expiry']} days ({d['nearest_expiry']})")
     elif d.get("days_to_expiry"):
-        expiry_alert = f"\n📅 Nearest expiry: {d['nearest_expiry']} ({d['days_to_expiry']} days)"
-    return f"""**{d['generic_name']}** ({d['brand_name']})  {d['formulation']} {d['strength']}
+        expiry_alert = (f"\n📅 Nearest expiry: {d['nearest_expiry']} "
+                        f"({d['days_to_expiry']} days)")
+    return f"""**{d['generic_name']}** ({d['brand_name']}) — {d['formulation']} {d['strength']}
 
 | | |
 |---|---|
@@ -442,12 +478,12 @@ def respond(message, chat_history, search_history):
     history_md = "\n".join([f"- {h}" for h in search_history])
     return "", chat_history, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md)
 
-# ── Drug summary (chip / lookup button) ──────────────────────
+# ── Drug summary card ─────────────────────────────────────────
 def drug_summary(drug_name, chat_history, search_history):
     if not drug_name:
         return chat_history, search_history, gr.update(), gr.update()
     try:
-        data  = query_drug_summary(drug_name)
+        data   = query_drug_summary(drug_name)
         answer = generate_drug_summary_answer(drug_name, data)
     except Exception as e:
         answer = f"Error: {str(e)}"
@@ -470,7 +506,7 @@ def reask_from_history(selected_question, chat_history, search_history):
         return "", chat_history, search_history, gr.update(), gr.update()
     return respond(selected_question, chat_history, search_history)
 
-# ── Featured drugs ────────────────────────────────────────────
+# ── Featured drugs & quick questions ─────────────────────────
 FEATURED_DRUGS = [
     "Amoxicillin", "Paracetamol", "Metformin", "Ibuprofen",
     "Ciprofloxacin", "Azithromycin", "Amlodipine", "Losartan",
@@ -489,9 +525,9 @@ QUICK_QUESTIONS = [
 # ── Gradio UI ─────────────────────────────────────────────────
 with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
-    # Header
+    # ── Header ────────────────────────────────────────────────
     gr.HTML("""
-    <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c)
+    <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c);
                 padding: 16px 24px; border-radius: 10px; margin-bottom: 16px;
                 display: flex; align-items: center; justify-content: space-between;">
         <img src="https://huggingface.co/spaces/Sylvester1922/Netrisyl_pharmacy_assistant/resolve/main/NI_Logo.png"
@@ -546,8 +582,9 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
                                for d in FEATURED_DRUGS[5:]]
             with gr.Row():
                 msg    = gr.Textbox(
-                    placeholder="Ask about stock, prices, interactions, expiry, suppliers...",
-                    label="", scale=5
+                    placeholder="Ask by drug name e.g. 'Do we have Amoxicillin?' or 'What interacts with Metformin?'",
+                    label="",
+                    scale=5
                 )
                 submit = gr.Button("Ask", variant="primary", scale=1)
             with gr.Row():
@@ -570,14 +607,14 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     gr.HTML("""
     <div style="text-align:center; margin-top:16px; color:#7f8c8d; font-size:12px;">
-        Netrisyl Insights · Harare, Zimbabwe · Powered by AI
+        Netrisyl Insights · Harare, Zimbabwe · Data. Analytics. Intelligence.
     </div>
     """)
 
     # ── Shared state ──────────────────────────────────────────
     search_history_state = gr.State([])
 
-    # ── Chat input wiring ─────────────────────────────────────
+    # ── Wire chat input ───────────────────────────────────────
     submit.click(
         respond,
         [msg, chatbot, search_history_state],
@@ -589,7 +626,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         [msg, chatbot, search_history_state, history_dropdown, history_display]
     )
 
-    # ── History dropdown — re-ask ─────────────────────────────
+    # ── History dropdown — re-ask selected question ───────────
     history_dropdown.change(
         reask_from_history,
         [history_dropdown, chatbot, search_history_state],
@@ -600,7 +637,8 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
         btn.click(
             click_quick_question,
-            [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
+            [gr.Textbox(value=question, visible=False),
+             chatbot, search_history_state],
             [msg, chatbot, search_history_state, history_dropdown, history_display]
         )
 
@@ -610,7 +648,8 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     for chip, drug_name in all_chips:
         chip.click(
             drug_summary,
-            [gr.Textbox(value=drug_name, visible=False), chatbot, search_history_state],
+            [gr.Textbox(value=drug_name, visible=False),
+             chatbot, search_history_state],
             [chatbot, search_history_state, history_dropdown, history_display]
         )
 
