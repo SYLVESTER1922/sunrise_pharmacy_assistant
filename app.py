@@ -171,9 +171,40 @@ def query_drug_summary(drug_name):
         return pd.read_sql_query(sql, conn, params=(f"%{drug_name}%",)).to_dict("records")
 
 def query_symptom(question):
+    # Map lay terms to clinical terms used in the indications field
+    symptom_map = {
+        "flu":           ["respiratory", "fever", "influenza"],
+        "cold":          ["respiratory", "nasal", "rhinitis"],
+        "headache":      ["pain", "analgesic", "fever"],
+        "fever":         ["fever", "antipyretic", "pain"],
+        "pain":          ["pain", "analgesic", "inflammation"],
+        "cough":         ["cough", "respiratory", "bronchitis"],
+        "stomach":       ["gastrointestinal", "nausea", "diarrhea"],
+        "diarrhea":      ["diarrhea", "gastrointestinal"],
+        "nausea":        ["nausea", "vomiting", "gastrointestinal"],
+        "malaria":       ["malaria"],
+        "diabetes":      ["diabetes", "glycemic", "blood glucose"],
+        "hypertension":  ["hypertension", "blood pressure"],
+        "infection":     ["infection", "bacterial", "antibiotic"],
+        "fungal":        ["fungal", "candida", "antifungal"],
+        "worms":         ["helminth", "worm", "parasitic"],
+        "hiv":           ["hiv", "antiretroviral", "aids"],
+        "ulcer":         ["ulcer", "gastric", "antacid"],
+        "asthma":        ["asthma", "bronchospasm", "respiratory"],
+        "allergy":       ["allergy", "antihistamine", "hypersensitivity"],
+    }
+    q = question.lower()
+    search_terms = []
+    for lay_term, clinical_terms in symptom_map.items():
+        if lay_term in q:
+            search_terms.extend(clinical_terms)
+    # Also include raw keywords as fallback
     keywords = extract_drug_name(question)
-    parts = [w for w in keywords.split() if len(w) > 3]
-    if not parts:
+    raw_parts = [w for w in keywords.split() if len(w) > 3]
+    search_terms.extend(raw_parts)
+    # Deduplicate
+    search_terms = list(set(search_terms))
+    if not search_terms:
         return []
     cypher = """
         MATCH (d:Drug)-[:IN_CATEGORY]->(c:Category)
@@ -186,7 +217,7 @@ def query_symptom(question):
         LIMIT 5
     """
     with driver.session() as session:
-        return [dict(r) for r in session.run(cypher, words=parts)]
+        return [dict(r) for r in session.run(cypher, words=search_terms)]
         
 def query_alternative(question):
     keywords = extract_drug_name(question)
