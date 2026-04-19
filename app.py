@@ -491,7 +491,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     # Header
     gr.HTML("""
-    <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c);
+    <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c)
                 padding: 16px 24px; border-radius: 10px; margin-bottom: 16px;
                 display: flex; align-items: center; justify-content: space-between;">
         <img src="https://huggingface.co/spaces/Sylvester1922/Netrisyl_pharmacy_assistant/resolve/main/NI_Logo.png"
