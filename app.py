@@ -341,7 +341,7 @@ def generate_answer(question, intent, source, data):
 Answer ONLY using the structured data provided below. Never add facts from general knowledge.
 Rules:
 - Answer in 3-5 sentences maximum
-- Stick strictly to the question asked — do not volunteer unrelated information
+- Stick strictly to the question asked, do not volunteer unrelated information
 - Always mention the data source at the end
 - For drug interactions, always state the severity level (Minor/Moderate/Major)
 - For stock questions, state exact quantity and mention if at or below reorder level
