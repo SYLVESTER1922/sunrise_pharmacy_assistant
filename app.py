@@ -115,11 +115,6 @@ def classify_intent(question):
     elif any(w in q for w in ["alternative", "substitute", "instead of",
                                 "replace", "similar"]):
         return "alternative"
-    elif any(w in q for w in ["flu", "fever", "pain", "cough", "malaria",
-                                "diabetes", "hypertension", "infection",
-                                "headache", "diarrhea", "stomach", "recommend",
-                                "anything for", "what for", "treat"]):
-        return "symptom"
     else:
         return "drug_info"
 
@@ -170,54 +165,12 @@ def query_drug_summary(drug_name):
     with get_conn() as conn:
         return pd.read_sql_query(sql, conn, params=(f"%{drug_name}%",)).to_dict("records")
 
-def query_symptom(question):
-    # Map lay terms to clinical terms used in the indications field
-    symptom_map = {
-        "flu":           ["respiratory", "fever", "influenza"],
-        "cold":          ["respiratory", "nasal", "rhinitis"],
-        "headache":      ["pain", "analgesic", "fever"],
-        "fever":         ["fever", "antipyretic", "pain"],
-        "pain":          ["pain", "analgesic", "inflammation"],
-        "cough":         ["cough", "respiratory", "bronchitis"],
-        "stomach":       ["gastrointestinal", "nausea", "diarrhea"],
-        "diarrhea":      ["diarrhea", "gastrointestinal"],
-        "nausea":        ["nausea", "vomiting", "gastrointestinal"],
-        "malaria":       ["malaria"],
-        "diabetes":      ["diabetes", "glycemic", "blood glucose"],
-        "hypertension":  ["hypertension", "blood pressure"],
-        "infection":     ["infection", "bacterial", "antibiotic"],
-        "fungal":        ["fungal", "candida", "antifungal"],
-        "worms":         ["helminth", "worm", "parasitic"],
-        "hiv":           ["hiv", "antiretroviral", "aids"],
-        "ulcer":         ["ulcer", "gastric", "antacid"],
-        "asthma":        ["asthma", "bronchospasm", "respiratory"],
-        "allergy":       ["allergy", "antihistamine", "hypersensitivity"],
-    }
-    q = question.lower()
-    search_terms = []
-    for lay_term, clinical_terms in symptom_map.items():
-        if lay_term in q:
-            search_terms.extend(clinical_terms)
-    # Also include raw keywords as fallback
-    keywords = extract_drug_name(question)
-    raw_parts = [w for w in keywords.split() if len(w) > 3]
-    search_terms.extend(raw_parts)
-    # Deduplicate
-    search_terms = list(set(search_terms))
-    if not search_terms:
-        return []
-    cypher = """
-        MATCH (d:Drug)-[:IN_CATEGORY]->(c:Category)
-        WHERE any(word IN $words WHERE toLower(d.indications) CONTAINS word)
-        RETURN d.generic_name AS name,
-               d.indications  AS indications,
-               d.adult_dose   AS adult_dose,
-               d.prescription AS prescription,
-               c.name         AS category
-        LIMIT 5
+def handle_unknown(question):
     """
-    with driver.session() as session:
-        return [dict(r) for r in session.run(cypher, words=search_terms)]
+    Catches questions the chatbot cannot safely answer.
+    Returns a safe redirect message instead of guessing.
+    """
+    return []
         
 def query_alternative(question):
     keywords = extract_drug_name(question)
@@ -357,8 +310,6 @@ def run_query(question):
         return intent, "transaction records",              query_sales(question)
     elif intent == "alternative":
         return intent, "inventory database",               query_alternative(question)
-    elif intent == "symptom":
-        return intent, "drug knowledge graph",             query_symptom(question)
     else:
         return intent, "drug knowledge graph",             query_neo4j_drug_info(question)
 
@@ -373,6 +324,10 @@ GREETING_RESPONSE = """👋 Hello! I'm the Netrisyl Pharmacy Assistant. I can he
 - 🔄 **Alternatives** — *"What is an alternative to amoxicillin?"*
 - 💰 **Sales Summary** — *"What are the top selling drugs?"*
 
+⚠️ **Note:** Please ask questions by drug name. For symptom-based or clinical recommendations, consult a qualified pharmacist.
+
+Click a drug chip for a quick summary, or use the Drug Lookup on the left. How can I help?"""
+
 Click a drug chip for a quick summary, or use the Drug Lookup on the left. How can I help?"""
 
 def generate_answer(question, intent, source, data):
@@ -380,7 +335,8 @@ def generate_answer(question, intent, source, data):
         return GREETING_RESPONSE
     if not data:
         return ("I could not find any information matching your question. "
-                "Please check the drug name and try again.")
+                "Please search by drug name (e.g. 'Do we have Amoxicillin?' or 'What interacts with Metformin?'). "
+                "For symptom-based recommendations, please consult a qualified pharmacist.")
     system_prompt = """You are a pharmacy assistant at Sunrise Pharmacy in Harare, Zimbabwe.
 Answer ONLY using the structured data provided below. Never add facts from general knowledge.
 Rules:
