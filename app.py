@@ -462,7 +462,7 @@ def reask_from_history(selected_question, chat_history, search_history):
 FEATURED_DRUGS = [
     "Amoxicillin", "Paracetamol", "Metformin", "Ibuprofen",
     "Ciprofloxacin", "Azithromycin", "Amlodipine", "Losartan",
-    "Artemether/Lumefantrine", "Cotrimoxazole"
+    "Artemether/Lumefantrine", "Co-trimoxazole"
 ]
 
 QUICK_QUESTIONS = [
@@ -482,7 +482,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c);
                 padding: 16px 24px; border-radius: 10px; margin-bottom: 16px;
                 display: flex; align-items: center; justify-content: space-between;">
-        <img src="/file=NI_Logo.png"
+        <img src="https://huggingface.co/spaces/Sylvester1922/Netrisyl_pharmacy_assistant/resolve/main/NI_Logo.png"
              style="height: 70px; object-fit: contain;" alt="Netrisyl Insights"/>
         <div style="text-align: center; flex: 1;">
             <h1 style="color: white; margin: 0; font-size: 24px;">
