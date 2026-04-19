@@ -100,8 +100,40 @@ def extract_drug_name(question):
 
 # ── SQLite queries ────────────────────────────────────────────
 def query_stock_price(question):
+    q = question.lower()
+    # Category browse — "list antibiotics", "show antiretrovirals" etc
+    categories = ["antibiotics", "analgesics", "antihypertensives",
+                  "antidiabetics", "antimalarials", "vitamins",
+                  "antifungals", "gastrointestinal", "respiratory",
+                  "antiretrovirals", "gi medications"]
+    for cat in categories:
+        if cat in q:
+            sql = f"""
+                SELECT generic_name, brand_name, quantity_in_stock,
+                       selling_price_usd, shelf_location, category
+                FROM inventory
+                WHERE LOWER(category) LIKE '%{cat}%'
+                AND quantity_in_stock > 0
+                ORDER BY generic_name
+            """
+            with get_conn() as conn:
+                return pd.read_sql_query(sql, conn).to_dict("records")
+    # Count query — "how many drugs", "how many types"
+    if any(w in q for w in ["how many", "count", "total drugs", "drug types"]):
+        sql = """
+            SELECT category, COUNT(*) as count,
+                   SUM(quantity_in_stock) as total_units
+            FROM inventory
+            GROUP BY category
+            ORDER BY category
+        """
+        with get_conn() as conn:
+            return pd.read_sql_query(sql, conn).to_dict("records")
+    # Default — search by drug name
     keywords = extract_drug_name(question)
     parts = keywords.split()
+    if not parts:
+        return []
     conditions = " OR ".join(
         [f"LOWER(generic_name) LIKE '%{p}%' OR LOWER(brand_name) LIKE '%{p}%'"
          for p in parts]
@@ -150,6 +182,20 @@ def query_alternative(question):
     """
     with get_conn() as conn:
         return pd.read_sql_query(sql, conn).to_dict("records")
+        
+def query_symptom(question):
+    keywords = extract_drug_name(question)
+    parts = keywords.split()
+    search = ' '.join(parts)
+    cypher = """
+        MATCH (d:Drug)-[:IN_CATEGORY]->(c:Category)
+        WHERE any(word IN $words WHERE toLower(d.indications) CONTAINS word)
+        RETURN d.generic_name AS name, d.indications AS indications,
+               d.adult_dose AS adult_dose, c.name AS category
+        LIMIT 5
+    """
+    with driver.session() as session:
+        return [dict(r) for r in session.run(cypher, words=parts)]
 
 def query_expiry(question):
     if any(w in question.lower() for w in
@@ -270,6 +316,13 @@ def run_query(question):
         return intent, "transaction records",              query_sales(question)
     elif intent == "alternative":
         return intent, "inventory database",               query_alternative(question)
+    elif any(w in q for w in ["flu", "fever", "pain", "cough", "malaria",
+                                "diabetes", "hypertension", "infection",
+                                "headache", "diarrhea", "stomach"]):
+        return "symptom"
+        
+    elif intent == "symptom":
+        return intent, "drug knowledge graph", query_symptom(question)
     else:
         return intent, "drug knowledge graph",             query_neo4j_drug_info(question)
 
@@ -302,6 +355,7 @@ Rules:
 - For expiry questions, flag anything expiring within 30 days as URGENT
 - For alternatives, list available options with stock levels
 - Never make up information not in the data
+- The transactions data covers the LAST 30 DAYS not a single day — never say "daily sales"
 - Use simple language suitable for pharmacy staff"""
     user_prompt = f"""
 Question: {question}
@@ -417,7 +471,7 @@ def reask_from_history(selected_question, chat_history, search_history):
 FEATURED_DRUGS = [
     "Amoxicillin", "Paracetamol", "Metformin", "Ibuprofen",
     "Ciprofloxacin", "Azithromycin", "Amlodipine", "Losartan",
-    "Artemether/Lumefantrine", "Cotrimoxazole"
+    "Artemether/Lumefantrine", "Co-trimoxazole"
 ]
 
 QUICK_QUESTIONS = [
