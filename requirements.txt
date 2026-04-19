@@ -1,0 +1,4 @@
+gradio
+neo4j
+openai
+pandas
