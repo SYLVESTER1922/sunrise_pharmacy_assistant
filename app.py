@@ -115,6 +115,11 @@ def classify_intent(question):
     elif any(w in q for w in ["alternative", "substitute", "instead of",
                                 "replace", "similar"]):
         return "alternative"
+    elif any(w in q for w in ["flu", "fever", "pain", "cough", "malaria",
+                                "diabetes", "hypertension", "infection",
+                                "headache", "diarrhea", "stomach", "recommend",
+                                "anything for", "what for", "treat"]):
+        return "symptom"
     else:
         return "drug_info"
 
@@ -165,6 +170,24 @@ def query_drug_summary(drug_name):
     with get_conn() as conn:
         return pd.read_sql_query(sql, conn, params=(f"%{drug_name}%",)).to_dict("records")
 
+    def query_symptom(question):
+    keywords = extract_drug_name(question)
+    parts = [w for w in keywords.split() if len(w) > 3]
+    if not parts:
+        return []
+    cypher = """
+        MATCH (d:Drug)-[:IN_CATEGORY]->(c:Category)
+        WHERE any(word IN $words WHERE toLower(d.indications) CONTAINS word)
+        RETURN d.generic_name AS name,
+               d.indications  AS indications,
+               d.adult_dose   AS adult_dose,
+               d.prescription AS prescription,
+               c.name         AS category
+        LIMIT 5
+    """
+    with driver.session() as session:
+        return [dict(r) for r in session.run(cypher, words=parts)]
+        
 def query_alternative(question):
     keywords = extract_drug_name(question)
     parts = keywords.split()
@@ -303,6 +326,8 @@ def run_query(question):
         return intent, "transaction records",              query_sales(question)
     elif intent == "alternative":
         return intent, "inventory database",               query_alternative(question)
+    elif intent == "symptom":
+        return intent, "drug knowledge graph",             query_symptom(question)
     else:
         return intent, "drug knowledge graph",             query_neo4j_drug_info(question)
 
