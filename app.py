@@ -218,7 +218,9 @@ def classify_intent(question, conversation_history=None):
     # Low stock / reorder alerts
     if any(w in q for w in [
         "low stock", "reorder", "running low", "almost out",
-        "need to order", "below reorder", "critical stock", "alert"
+        "need to order", "below reorder", "critical stock", "alert",
+        "running low on stock", "low on stock", "need reorder",
+        "stock alert", "which drugs", "drugs running"
     ]):
         return "low_stock"
 
@@ -333,7 +335,7 @@ def query_low_stock():
                reorder_level, category,
                (reorder_level - quantity_in_stock) AS units_below_reorder
         FROM inventory
-        WHERE quantity_in_stock <= reorder_level
+        WHERE quantity_in_stock <= (reorder_level * 1.5)
         ORDER BY units_below_reorder DESC
     """
     with get_conn() as conn:
@@ -344,7 +346,7 @@ def query_drug_summary(drug_name):
     sql = """
         SELECT i.generic_name, i.brand_name, i.formulation, i.strength,
                i.quantity_in_stock, i.reorder_level,
-               i.selling_price_usd, i.shelf_location, i.category,
+               i.selling_price_usd, i.cost_price_usd, i.shelf_location, i.category,
                MIN(b.expiry_date) AS nearest_expiry,
                CAST(MIN(julianday(b.expiry_date) - julianday('now')) AS INTEGER)
                AS days_to_expiry
@@ -430,12 +432,13 @@ def query_expiry(question):
 def query_sales(question):
     sql = """
         SELECT i.generic_name,
-               SUM(t.quantity_sold)              AS total_units,
-               ROUND(SUM(t.total_amount), 2)     AS total_revenue,
-               COUNT(*)                           AS num_transactions
+               i.brand_name,
+               SUM(t.quantity_sold)          AS total_units,
+               ROUND(SUM(t.total_amount), 2) AS total_revenue,
+               COUNT(*)                       AS num_transactions
         FROM transactions t
         JOIN inventory i ON t.product_id = i.product_id
-        GROUP BY i.generic_name
+        GROUP BY i.generic_name, i.brand_name
         ORDER BY total_revenue DESC
         LIMIT 10
     """
@@ -650,7 +653,7 @@ def generate_drug_summary_answer(drug_name, data):
 | **Stock** | {d['quantity_in_stock']} units — {stock_status} |
 | **Reorder Level** | {d['reorder_level']} units |
 | **Selling Price** | ${d['selling_price_usd']} |
-| **Cost Price** | ${d['cost_price_usd']} |
+| **Cost Price** | ${d.get('cost_price_usd', 'N/A')} |
 | **Shelf Location** | {d['shelf_location']} |
 | **Category** | {d['category']} |
 {expiry_line}"""
@@ -707,13 +710,13 @@ def respond(message, chat_history, search_history):
         )
 
         # Step 5 — Format response
-        if intent in ("greeting", "thanks", "farewell"):
+        if intent in ("greeting", "thanks", "farewell", "followup"):
             full_answer = answer
         else:
-            full_answer = answer
             if correction_note:
-                full_answer = f"{correction_note}\n\n{answer}"
-            full_answer = f"{full_answer}\n\n*Source: {source} | Intent: {intent}*"
+                full_answer = f"{correction_note}\n\n{answer}\n\n*Source: {source} | Intent: {intent}*"
+            else:
+                full_answer = f"{answer}\n\n*Source: {source} | Intent: {intent}*"
 
     except Exception as e:
         full_answer = f"An error occurred: {str(e)}\nPlease try rephrasing your question."
@@ -784,7 +787,7 @@ QUICK_QUESTIONS = [
     "Which batches are expiring soon?",
     "Who supplies ciprofloxacin?",
     "What are the top selling drugs?",
-    "Which drugs are running low?"
+    "Which drugs are running low on stock?"
 ]
 
 # ── Gradio UI ─────────────────────────────────────────────────
