@@ -18,16 +18,9 @@ driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ── Build SQLite from CSVs ────────────────────────────────────
-# NOTE: Swap this section for Google Sheets or PostgreSQL in production
-
 DB_PATH = "sunrise_pharmacy.db"
 
 def build_database():
-    """
-    Builds the SQLite database from CSV files on startup.
-    To upgrade to PostgreSQL: replace this function with a
-    PostgreSQL connection and remove the CSV loading logic.
-    """
     conn = sqlite3.connect(DB_PATH)
     tables = {
         "inventory":      "sunrise_pharmacy_inventory_pricing.csv",
@@ -52,10 +45,6 @@ build_database()
 
 # ── Thread-safe connection ────────────────────────────────────
 def get_conn():
-    """
-    Returns a fresh SQLite connection per thread.
-    To upgrade to PostgreSQL: replace with psycopg2.connect()
-    """
     return sqlite3.connect(DB_PATH)
 
 # ── Intent classification ─────────────────────────────────────
@@ -213,17 +202,17 @@ def query_neo4j_supplier(question):
 def run_query(question):
     intent = classify_intent(question)
     if intent == "stock_price":
-        return intent, "inventory database",        query_stock_price(question)
+        return intent, "inventory database",             query_stock_price(question)
     elif intent == "expiry":
-        return intent, "batch records",             query_expiry(question)
+        return intent, "batch records",                  query_expiry(question)
     elif intent == "interaction":
         return intent, "drug interaction knowledge graph", query_neo4j_interaction(question)
     elif intent == "supplier":
-        return intent, "supplier knowledge graph",  query_neo4j_supplier(question)
+        return intent, "supplier knowledge graph",       query_neo4j_supplier(question)
     elif intent == "sales":
-        return intent, "transaction records",       query_sales(question)
+        return intent, "transaction records",            query_sales(question)
     else:
-        return intent, "drug knowledge graph",      query_neo4j_drug_info(question)
+        return intent, "drug knowledge graph",           query_neo4j_drug_info(question)
 
 # ── GPT-4o-mini answer generator ──────────────────────────────
 def generate_answer(question, intent, source, data):
@@ -285,8 +274,7 @@ def respond(message, chat_history):
 def click_suggestion(suggestion, chat_history):
     return respond(suggestion, chat_history)
 
-with gr.Blocks(theme=gr.themes.Soft(),
-               title="Netrisyl Pharmacy Assistant") as demo:
+with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     gr.HTML("""
     <div style="background: linear-gradient(135deg, #1a5276, #2e86c1);
@@ -321,12 +309,7 @@ with gr.Blocks(theme=gr.themes.Soft(),
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
                 label="Pharmacy Assistant",
-                height=480,
-                type="messages",
-                avatar_images=(
-                    None,
-                    "https://cdn-icons-png.flaticon.com/512/3774/3774299.png"
-                )
+                height=480
             )
             with gr.Row():
                 msg = gr.Textbox(
