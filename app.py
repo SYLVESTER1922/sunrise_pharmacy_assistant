@@ -607,12 +607,23 @@ def generate_answer(question, intent, source, data, conversation_history=None):
         )
         return response.choices[0].message.content
 
-    # No data found
+    # No data found — give context-aware response based on intent
     if not data:
-        return ("I could not find any information matching your question in our pharmacy database. "
-                "Please try searching by the exact drug name "
-                "(e.g. 'Do we have Amoxicillin?' or 'What interacts with Metformin?'). "
-                "For clinical recommendations, please consult a qualified pharmacist.")
+        no_data_responses = {
+            "low_stock":      "Good news — all products are currently above their reorder levels. No drugs are running low at this time.",
+            "expiry":         "No batches matching your search were found in the expiry records. Please check the drug name and try again.",
+            "interaction":    "No interactions were found for that drug in our knowledge graph. Please consult a pharmacist or clinical reference.",
+            "alternative":    "No alternatives were found in the same category. Please consult a pharmacist for clinical substitution advice.",
+            "category_browse":"No drugs found in that category. Please check the category name and try again.",
+            "supplier":       "No supplier information found for that drug. Please check the drug name or contact procurement.",
+            "stock_price":    "That drug was not found in our inventory. Please check the spelling or use the Drug Lookup on the left.",
+            "drug_info":      "No information found for that drug. Please check the spelling or use the Drug Lookup on the left.",
+        }
+        return no_data_responses.get(
+            intent,
+            "I could not find any information matching your question. "
+            "Please search by drug name or consult a qualified pharmacist."
+        )
 
     user_prompt = f"""
 Question: {question}
