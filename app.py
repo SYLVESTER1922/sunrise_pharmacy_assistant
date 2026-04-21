@@ -149,7 +149,15 @@ def classify_intent(question, conversation_history=None):
     if (conversation_history and len(q.split()) <= 8 and
             any(ref in q_clean for ref in followup_refs)):
         return "followup"
-
+# Low stock — MUST come before stock_price check
+    if any(w in q for w in [
+        "low stock", "running low", "almost out", "reorder",
+        "need to order", "below reorder", "critical stock",
+        "running low on stock", "low on stock", "need reorder",
+        "stock alert", "drugs running", "which drugs are",
+        "what drugs are", "what products are"
+    ]):
+        return "low_stock"
     # Stock, price, availability
     if any(w in q for w in [
         "stock", "have", "available", "availability", "quantity",
@@ -214,15 +222,6 @@ def classify_intent(question, conversation_history=None):
         "equivalent", "whats another", "what else can"
     ]):
         return "alternative"
-
-    # Low stock / reorder alerts
-    if any(w in q for w in [
-        "low stock", "reorder", "running low", "almost out",
-        "need to order", "below reorder", "critical stock", "alert",
-        "running low on stock", "low on stock", "need reorder",
-        "stock alert", "which drugs", "drugs running"
-    ]):
-        return "low_stock"
 
     # Drug info (default)
     return "drug_info"
