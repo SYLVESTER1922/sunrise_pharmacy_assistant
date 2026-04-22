@@ -95,7 +95,7 @@ def fuzzy_correct_question(question):
     corrected_words = list(words)
     for i, word in enumerate(words):
         w = word.lower()
-        if len(w) < 4 or w in skip_words:
+        if len(w) < 4 or w in skip_words or w.isdigit():
             continue
         match = fuzzy_match_drug(w, threshold=78)
         if match and match.lower() != w:
