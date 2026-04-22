@@ -125,7 +125,12 @@ def classify_intent(question, conversation_history=None):
         return "thanks"
     if any(g in q_clean for g in FAREWELLS):
         return "farewell"
-
+# Interaction — always takes priority, checked before followup
+    if any(w in q for w in [
+        "interact", "interaction", "safe with", "combine",
+        "take with", "used with", "avoid with", "contraindic"
+    ]):
+        return "interaction"
     # Follow-up detection
     followup_refs = [
         "it","these", "those", "them", "they",
