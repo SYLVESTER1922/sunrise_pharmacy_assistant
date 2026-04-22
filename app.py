@@ -673,7 +673,7 @@ ABSOLUTE RULES — violating these is not permitted under any circumstances:
 4. Never add interactions, contraindications or side effects not explicitly present in the data.
 5. Keep the answer to 3-5 sentences. Be precise and factual.
 6. For interactions, always state the exact severity level from the data (Minor/Moderate/Major).
-7. End every answer with: "Source: [data source name]"
+7. 7. End every answer with: "Source: pharmacy knowledge graph"
 """
 
 def generate_clinical_answer(question, intent, source, data, conversation_history=None):
