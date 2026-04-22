@@ -513,18 +513,27 @@ def format_sales(question):
         footer = f"\n**Total Revenue: ${total:,.2f}**"
         return header + "\n".join(rows) + footer
     else:
-        sql = """
-            SELECT i.brand_name, i.generic_name,
-                   SUM(t.quantity_sold)          AS total_units,
-                   ROUND(SUM(t.total_amount), 2) AS total_revenue,
-                   COUNT(*)                       AS num_transactions
-            FROM transactions t
-            JOIN inventory i ON t.product_id = i.product_id
-            GROUP BY i.brand_name, i.generic_name
-            ORDER BY total_revenue DESC LIMIT 10
-        """
-        with get_conn() as conn:
-            df = pd.read_sql_query(sql, conn)
+        # Extract requested number from question — default 10
+    import re
+    numbers = re.findall(r'\b(\d+)\b', question)
+    limit = int(numbers[0]) if numbers else 10
+    limit = max(1, min(limit, 50))  # cap between 1 and 50
+
+    sql = """
+        SELECT i.brand_name,
+               i.generic_name,
+               SUM(t.quantity_sold)          AS total_units,
+               ROUND(SUM(t.total_amount), 2) AS total_revenue,
+               COUNT(*)                       AS num_transactions
+        FROM transactions t
+        JOIN inventory i ON t.product_id = i.product_id
+        GROUP BY i.brand_name, i.generic_name
+        ORDER BY total_revenue DESC
+        LIMIT ?
+    """
+    with get_conn() as conn:
+        df = pd.read_sql_query(sql, conn, params=(limit,))
+
         header = "**Top 10 Selling Drugs** (Last 30 days)\n\n"
         header += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n"
         header += "|---|---|---|---|---|---|\n"
