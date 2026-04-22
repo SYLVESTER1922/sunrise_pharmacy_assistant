@@ -15,7 +15,12 @@ NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+driver = GraphDatabase.driver(
+    NEO4J_URI,
+    auth=(NEO4J_USERNAME, NEO4J_PASSWORD),
+    max_connection_lifetime=200,
+    keep_alive=True
+)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ── Build SQLite from CSVs on startup ─────────────────────────
@@ -123,7 +128,7 @@ def classify_intent(question, conversation_history=None):
 
     # Follow-up detection
     followup_refs = [
-        "it", "this", "that", "these", "those", "them", "they",
+        "it","these", "those", "them", "they",
         "the same", "above", "mentioned", "you said", "tell me more",
         "more about", "elaborate", "go on", "continue", "what else",
         "expand", "in detail", "and what about", "how about",
@@ -132,6 +137,23 @@ def classify_intent(question, conversation_history=None):
     if (conversation_history and len(q.split()) <= 8 and
             any(ref in q_clean for ref in followup_refs)):
         return "followup"
+        # CATEGORY BROWSE — must come before stock_price
+    if any(w in q for w in [
+        "antiretroviral", "arvs", "arv", "hiv drugs",
+        "antibiotic", "analgesic", "antihypertensive",
+        "antidiabetic", "antimalarial", "antifungal",
+        "list all", "show all", "all antibiotics",
+        "all antiretrovirals", "all analgesics"
+    ]):
+        return "category_browse"
+
+    # STATS — must come before stock_price
+    if any(w in q for w in [
+        "how many drug", "how many categor", "drug categor",
+        "how many types", "inventory summary", "stock summary",
+        "inventory overview", "categories we have"
+    ]):
+        return "stats"
 
     # LOW STOCK — must come before stock_price
     if any(w in q for w in [
