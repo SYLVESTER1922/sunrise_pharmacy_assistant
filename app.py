@@ -514,9 +514,9 @@ def format_sales(question):
         return header + "\n".join(rows) + footer
     else:
         # Extract requested number from question — default 10
-    numbers = re.findall(r'\b(\d+)\b', question)
-    limit = int(numbers[0]) if numbers else 10
-    limit = max(1, min(limit, 50))  # cap between 1 and 50
+        numbers = re.findall(r'\b(\d+)\b', question)
+        limit = int(numbers[0]) if numbers else 10
+        limit = max(1, min(limit, 50))  # cap between 1 and 50
 
     sql = """
         SELECT i.brand_name,
