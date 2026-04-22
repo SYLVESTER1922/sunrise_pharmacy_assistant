@@ -233,9 +233,10 @@ def classify_intent(question, conversation_history=None):
         "sold", "sales", "revenue", "dispensed", "transaction",
         "top selling", "best selling", "most popular", "most sold",
         "highest revenue", "performance", "turnover",
-        "customer type", "customer breakdown", "by customer",
-        "breakdown", "split by", "prescription sales",
-        "walk-in", "insurance sales"
+        "selling drugs", "selling brands", "selling products",
+        "top drugs", "top brands", "top products", "top medicines",
+        "selling medicines", "selling items", "best drugs",
+        "best brands", "best medicines", "top performers"
     ]):
         return "sales"
 
