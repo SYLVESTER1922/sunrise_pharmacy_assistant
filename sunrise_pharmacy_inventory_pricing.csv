@@ -1,28 +1,28 @@
 product_id,generic_name,brand_name,formulation,strength,unit_of_measure,quantity_in_stock,reorder_level,cost_price_usd,selling_price_usd,shelf_location,category
-P001,Amoxicillin,Moxil,Capsule,500 mg,box of 100,180,80,8.5,12.0,A1-01,Antibiotics
-P002,Azithromycin,Azimed,Tablet,500 mg,box of 3,95,40,3.2,5.0,A1-02,Antibiotics
+P001,Amoxicillin,Moxil,Capsule,500 mg,box of 100,180,80,8.5,12,A1-01,Antibiotics
+P002,Azithromycin,Azimed,Tablet,500 mg,box of 3,95,40,3.2,5,A1-02,Antibiotics
 P003,Ceftriaxone,Ceftriz,Injection,1 g vial,vial,70,30,1.85,3.2,A1-03,Antibiotics
 P004,Ciprofloxacin,Ciprox,Tablet,500 mg,box of 10,120,50,2.4,3.8,A1-04,Antibiotics
-P005,Co-trimoxazole,Septrin,Suspension,240 mg/5 mL,bottle 100 mL,60,25,1.6,2.8,A1-05,Antibiotics
+P005,Co-trimoxazole,Septrin,Suspension,240 mg/5 mL,bottle 100 mL,15,25,1.6,2.8,A1-05,Antibiotics
 P006,Paracetamol,Panadol,Tablet,500 mg,box of 100,300,120,3.5,5.5,B1-01,Analgesics
 P007,Ibuprofen,Brufen,Tablet,400 mg,box of 100,220,90,4.1,6.5,B1-02,Analgesics
 P008,Diclofenac,Voltaren,Tablet,50 mg,box of 100,140,60,4.8,7.2,B1-03,Analgesics
 P009,Tramadol,Tramazac,Capsule,50 mg,box of 20,85,35,2.9,4.8,B1-04,Analgesics
-P010,Codeine/Paracetamol,Myprodol,Tablet,8 mg/500 mg,box of 30,65,25,3.8,6.0,B1-05,Analgesics
+P010,Codeine/Paracetamol,Myprodol,Tablet,8 mg/500 mg,box of 30,65,25,3.8,6,B1-05,Analgesics
 P011,Amlodipine,Amcard,Tablet,5 mg,box of 30,260,100,1.9,3.2,C1-01,Antihypertensives
 P012,Atenolol,Tenol,Tablet,50 mg,box of 28,150,60,1.7,2.9,C1-02,Antihypertensives
 P013,Hydrochlorothiazide,Hydrozide,Tablet,25 mg,box of 28,180,70,1.2,2.1,C1-03,Antihypertensives
 P014,Losartan,Losagen,Tablet,50 mg,box of 30,110,45,2.6,4.2,C1-04,Antihypertensives
-P015,Enalapril,Enacard,Tablet,10 mg,box of 30,130,50,1.8,3.0,C1-05,Antihypertensives
+P015,Enalapril,Enacard,Tablet,10 mg,box of 30,130,50,1.8,3,C1-05,Antihypertensives
 P016,Metformin,Glucoform,Tablet,500 mg,box of 60,240,100,2.1,3.6,D1-01,Antidiabetics
 P017,Glibenclamide,Daonil,Tablet,5 mg,box of 100,120,50,1.5,2.6,D1-02,Antidiabetics
-P018,Gliclazide,Diamicron,Tablet,80 mg,box of 60,90,35,3.0,4.9,D1-03,Antidiabetics
+P018,Gliclazide,Diamicron,Tablet,80 mg,box of 60,90,35,3,4.9,D1-03,Antidiabetics
 P019,Insulin soluble human,Actrapid,Injection,100 IU/mL,vial 10 mL,45,20,4.8,7.8,D1-04,Antidiabetics
 P020,Insulin isophane human,Insulatard,Injection,100 IU/mL,vial 10 mL,40,18,5.1,8.2,D1-05,Antidiabetics
 P021,Artemether/Lumefantrine,Coartem,Tablet,20/120 mg,box of 24,110,45,1.85,3.2,E1-01,Antimalarials
 P022,Quinine sulfate,Q-500,Tablet,300 mg,box of 30,50,20,2.2,3.9,E1-02,Antimalarials
-P023,Sulfadoxine/Pyrimethamine,Fansidar,Tablet,500/25 mg,box of 3,75,30,1.1,2.0,E1-03,Antimalarials
-P024,Artesunate,Artesun,Injection,60 mg,vial,28,12,2.7,4.6,E1-04,Antimalarials
+P023,Sulfadoxine/Pyrimethamine,Fansidar,Tablet,500/25 mg,box of 3,75,30,1.1,2,E1-03,Antimalarials
+P024,Artesunate,Artesun,Injection,60 mg,vial,10,12,2.7,4.6,E1-04,Antimalarials
 P025,Primaquine,Primaq,Tablet,15 mg,box of 14,35,15,1.4,2.5,E1-05,Antimalarials
 P026,Ferrous sulfate/Folic acid,Fefol,Capsule,200 mg/0.25 mg,box of 30,160,60,1.2,2.2,F1-01,Vitamins/Supplements
 P027,Multivitamin,Vidaylin,Syrup,100 mL,bottle 100 mL,95,40,1.8,3.2,F1-02,Vitamins/Supplements
@@ -31,21 +31,21 @@ P029,Calcium carbonate/Vitamin D3,Cal-D,Tablet,600 mg/400 IU,box of 30,80,30,2.1
 P030,Zinc sulfate,Zincovit,Tablet,20 mg,box of 20,70,25,0.85,1.7,F1-05,Vitamins/Supplements
 P031,Fluconazole,Flucor,Capsule,150 mg,box of 1,55,20,0.75,1.6,G1-01,Antifungals
 P032,Clotrimazole,Canesten,Cream,1% 20 g,tube,85,30,1.1,2.1,G1-02,Antifungals
-P033,Nystatin,Nilstat,Suspension,"100,000 IU/mL",bottle 30 mL,40,15,1.6,2.9,G1-03,Antifungals
+P033,Nystatin,Nilstat,Suspension,"100,000 IU/mL",bottle 30 mL,12,15,1.6,2.9,G1-03,Antifungals
 P034,Ketoconazole,Nizoral,Tablet,200 mg,box of 10,35,15,2.3,3.9,G1-04,Antifungals
-P035,Miconazole,Daktarin,Oral gel,20 mg/g 15 g,tube,28,12,2.0,3.5,G1-05,Antifungals
+P035,Miconazole,Daktarin,Oral gel,20 mg/g 15 g,tube,28,12,2,3.5,G1-05,Antifungals
 P036,Omeprazole,Losec,Capsule,20 mg,box of 30,160,60,1.9,3.4,H1-01,GI medications
 P037,Oral Rehydration Salts,ORS,Sachet,20.5 g,sachet,260,100,0.18,0.45,H1-02,GI medications
-P038,Metoclopramide,Maxolon,Tablet,10 mg,box of 100,75,30,1.1,2.0,H1-03,GI medications
+P038,Metoclopramide,Maxolon,Tablet,10 mg,box of 100,75,30,1.1,2,H1-03,GI medications
 P039,Loperamide,Imodium,Capsule,2 mg,box of 20,65,25,1.3,2.3,H1-04,GI medications
-P040,Aluminium hydroxide/Magnesium hydroxide,Maalox,Suspension,200/200 mg per 5 mL,bottle 200 mL,45,20,2.4,4.0,H1-05,GI medications
+P040,Aluminium hydroxide/Magnesium hydroxide,Maalox,Suspension,200/200 mg per 5 mL,bottle 200 mL,45,20,2.4,4,H1-05,GI medications
 P041,Salbutamol,Ventolin,Inhaler,100 mcg/dose,inhaler,70,25,3.8,6.5,I1-01,Respiratory
 P042,Cetirizine,Zyrtec,Tablet,10 mg,box of 30,90,35,1.3,2.4,I1-02,Respiratory
 P043,Prednisolone,Predsol,Tablet,5 mg,box of 30,85,30,1.1,2.1,I1-03,Respiratory
 P044,Bromhexine,Bisolvon,Syrup,4 mg/5 mL,bottle 100 mL,38,15,1.7,2.9,I1-04,Respiratory
 P045,Beclometasone,Beclate,Inhaler,50 mcg/dose,inhaler,30,12,4.6,7.8,I1-05,Respiratory
 P046,Tenofovir/Lamivudine/Dolutegravir,TLD,Tablet,300/300/50 mg,bottle of 30,90,40,5.5,8.5,J1-01,Antiretrovirals
-P047,Zidovudine/Lamivudine,Combivir,Tablet,300/150 mg,bottle of 60,45,18,6.0,9.2,J1-02,Antiretrovirals
-P048,Abacavir/Lamivudine,Kivexa,Tablet,600/300 mg,bottle of 30,35,15,8.2,12.0,J1-03,Antiretrovirals
+P047,Zidovudine/Lamivudine,Combivir,Tablet,300/150 mg,bottle of 60,45,18,6,9.2,J1-02,Antiretrovirals
+P048,Abacavir/Lamivudine,Kivexa,Tablet,600/300 mg,bottle of 30,35,15,8.2,12,J1-03,Antiretrovirals
 P049,Efavirenz,Stocrin,Tablet,600 mg,bottle of 30,25,10,4.1,6.8,J1-04,Antiretrovirals
-P050,Lopinavir/Ritonavir,Aluvia,Tablet,200/50 mg,bottle of 120,20,8,18.0,24.0,J1-05,Antiretrovirals
+P050,Lopinavir/Ritonavir,Aluvia,Tablet,200/50 mg,bottle of 120,5,8,18,24,J1-05,Antiretrovirals
