@@ -514,27 +514,58 @@ def format_sales(question):
         footer = f"\n**Total Revenue: ${total:,.2f}**"
         return header + "\n".join(rows) + footer
     else:
-        # Extract requested number from question — default 10
+        # Extract number — digits and written numbers
+        number_words = {
+            "one":1,"two":2,"three":3,"four":4,"five":5,
+            "six":6,"seven":7,"eight":8,"nine":9,"ten":10
+        }
         numbers = re.findall(r'\b(\d+)\b', question)
-        limit = int(numbers[0]) if numbers else 10
-        limit = max(1, min(limit, 50))  # cap between 1 and 50
+        limit = int(numbers[0]) if numbers else None
+        if not limit:
+            for word, num in number_words.items():
+                if word in q:
+                    limit = num
+                    break
+        limit = limit or 10
+        limit = max(1, min(limit, 50))
 
-    sql = """
-        SELECT i.brand_name,
-               i.generic_name,
-               SUM(t.quantity_sold)          AS total_units,
-               ROUND(SUM(t.total_amount), 2) AS total_revenue,
-               COUNT(*)                       AS num_transactions
-        FROM transactions t
-        JOIN inventory i ON t.product_id = i.product_id
-        GROUP BY i.brand_name, i.generic_name
-        ORDER BY total_revenue DESC
-        LIMIT ?
-    """
-    with get_conn() as conn:
-        df = pd.read_sql_query(sql, conn, params=(limit,))
+        # Detect sort direction
+        if any(w in q for w in [
+            "least", "lowest", "bottom", "worst", "slow",
+            "poor", "less", "fewest", "minimum", "last"
+        ]):
+            order = "ASC"
+            direction_label = f"Bottom {limit}"
+        else:
+            order = "DESC"
+            direction_label = f"Top {limit}"
 
-        header = "**Top 10 Selling Drugs** (Last 30 days)\n\n"
+        # Detect sort column
+        if any(w in q for w in ["unit", "quantity", "volume", "dispensed"]):
+            sort_col = "total_units"
+            sort_label = "by units sold"
+        elif any(w in q for w in ["transaction", "frequency", "times"]):
+            sort_col = "num_transactions"
+            sort_label = "by number of transactions"
+        else:
+            sort_col = "total_revenue"
+            sort_label = "by revenue"
+
+        sql = f"""
+            SELECT i.brand_name,
+                   i.generic_name,
+                   SUM(t.quantity_sold)          AS total_units,
+                   ROUND(SUM(t.total_amount), 2) AS total_revenue,
+                   COUNT(*)                       AS num_transactions
+            FROM transactions t
+            JOIN inventory i ON t.product_id = i.product_id
+            GROUP BY i.brand_name, i.generic_name
+            ORDER BY {sort_col} {order}
+            LIMIT ?
+        """
+        with get_conn() as conn:
+            df = pd.read_sql_query(sql, conn, params=(limit,))
+        header = f"**{direction_label} Selling Drugs** {sort_label} (Last 30 days)\n\n"
         header += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n"
         header += "|---|---|---|---|---|---|\n"
         rows = [
