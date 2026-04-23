@@ -625,7 +625,11 @@ def format_drug_summary(drug_name):
         FROM inventory i
         LEFT JOIN batches b ON i.product_id = b.product_id
         WHERE LOWER(i.generic_name) LIKE LOWER(%s)
-        GROUP BY i.product_id LIMIT 1
+        GROUP BY i.product_id, i.generic_name, i.brand_name, i.formulation, 
+         i.strength, i.quantity_in_stock, i.reorder_level,
+         i.selling_price_usd, i.cost_price_usd, i.shelf_location, 
+         i.category
+LIMIT 1
     """
     conn = get_conn()
     try:
