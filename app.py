@@ -343,8 +343,8 @@ def format_stats():
         SELECT category,
                COUNT(*)               AS drug_count,
                SUM(quantity_in_stock) AS total_units,
-               ROUND(AVG(selling_price_usd), 2) AS avg_price,
-               ROUND(SUM(quantity_in_stock * cost_price_usd), 2) AS inventory_value
+               ROUND(AVG(selling_price_usd)::numeric, 2) AS avg_price,
+               ROUND(SUM(quantity_in_stock * cost_price_usd)::numeric, 2) AS inventory_value
         FROM inventory
         GROUP BY category ORDER BY inventory_value DESC
     """
@@ -370,7 +370,7 @@ def format_low_stock():
     sql = """
         SELECT generic_name, brand_name, quantity_in_stock,
                reorder_level, category,
-               ROUND((CAST(quantity_in_stock AS FLOAT) / reorder_level) * 100, 0)
+               ROUND((quantity_in_stock::numeric / reorder_level) * 100, 0)
                AS stock_pct
         FROM inventory
         WHERE quantity_in_stock <= reorder_level
@@ -404,11 +404,11 @@ def format_expiry(question):
         sql = """
             SELECT i.generic_name, i.brand_name, b.batch_number,
                    b.expiry_date, b.quantity_remaining,
-                   CAST(julianday(b.expiry_date) - julianday('now') AS INTEGER)
+                   EXTRACT(DAY FROM (b.expiry_date::date - CURRENT_DATE))::INTEGER
                    AS days_remaining
             FROM batches b
             JOIN inventory i ON b.product_id = i.product_id
-            WHERE julianday(b.expiry_date) - julianday('now') <= 90
+            WHERE (b.expiry_date::date - CURRENT_DATE) <= 90
             ORDER BY b.expiry_date ASC
         """
         conn = get_conn()
@@ -444,7 +444,7 @@ def format_expiry(question):
         sql = f"""
             SELECT i.generic_name, i.brand_name, b.batch_number,
                    b.expiry_date, b.quantity_remaining,
-                   CAST(julianday(b.expiry_date) - julianday('now') AS INTEGER)
+                   EXTRACT(DAY FROM (b.expiry_date::date - CURRENT_DATE))::INTEGER
                    AS days_remaining
             FROM batches b
             JOIN inventory i ON b.product_id = i.product_id
@@ -481,9 +481,9 @@ def format_sales(question):
             SELECT customer_type,
                    COUNT(*)                    AS num_transactions,
                    SUM(quantity_sold)          AS total_units,
-                   ROUND(SUM(total_amount), 2) AS total_revenue,
-                   ROUND(SUM(total_amount) * 100.0 /
-                       (SELECT SUM(total_amount) FROM transactions), 1)
+                   ROUND(SUM(total_amount)::numeric, 2) AS total_revenue,
+                   ROUND((SUM(total_amount) * 100.0 /
+                       (SELECT SUM(total_amount) FROM transactions))::numeric, 1)
                    AS revenue_pct
             FROM transactions
             GROUP BY customer_type
@@ -509,7 +509,7 @@ def format_sales(question):
         sql = """
             SELECT i.brand_name, i.generic_name,
                    SUM(t.quantity_sold)          AS total_units,
-                   ROUND(SUM(t.total_amount), 2) AS total_revenue,
+                   ROUND(SUM(t.total_amount)::numeric, 2) AS total_revenue,
                    COUNT(*)                       AS num_transactions
             FROM transactions t
             JOIN inventory i ON t.product_id = i.product_id
@@ -620,7 +620,7 @@ def format_drug_summary(drug_name):
                i.selling_price_usd, i.cost_price_usd,
                i.shelf_location, i.category,
                MIN(b.expiry_date) AS nearest_expiry,
-               CAST(MIN(julianday(b.expiry_date) - julianday('now')) AS INTEGER)
+               EXTRACT(DAY FROM (MIN(b.expiry_date::date) - CURRENT_DATE))::INTEGER
                AS days_to_expiry
         FROM inventory i
         LEFT JOIN batches b ON i.product_id = b.product_id
