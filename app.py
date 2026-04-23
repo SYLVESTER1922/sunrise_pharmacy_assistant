@@ -849,6 +849,8 @@ def respond(message, chat_history, search_history):
     if not message or message.strip() == "":
         return "", chat_history, search_history, gr.update(), gr.update()
 
+    build_database()  # refresh from Google Sheets on every query
+
     conversation_history = [
         {"role": t["role"], "content": t["content"]}
         for t in (chat_history or [])
