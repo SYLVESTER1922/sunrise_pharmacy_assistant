@@ -119,7 +119,12 @@ def classify_intent(question, conversation_history=None):
         return "thanks"
     if any(g in q_clean for g in FAREWELLS):
         return "farewell"
-
+# Interaction — always takes priority over followup
+    if any(w in q for w in [
+        "interact", "interaction", "safe with", "combine",
+        "take with", "used with", "avoid with", "contraindic"
+    ]):
+        return "interaction"
     # Follow-up detection
     followup_refs = [
         "it", "this", "that", "these", "those", "them", "they",
@@ -207,7 +212,10 @@ def classify_intent(question, conversation_history=None):
         "highest revenue", "performance", "turnover",
         "customer type", "customer breakdown", "by customer",
         "breakdown", "split by", "prescription sales",
-        "walk-in", "insurance sales"
+        "walk-in", "insurance sales",
+        "least selling", "least sold", "slow moving",
+        "slowest", "worst selling", "bottom selling",
+        "least popular", "lowest selling"
     ]):
         return "sales"
 
@@ -646,9 +654,9 @@ LIMIT 1
         if d <= 30:
             expiry_line = f"\n🚨 **URGENT:** Nearest batch expires in {d} days ({r['nearest_expiry']})"
         elif d <= 90:
-            expiry_line = f"\n⚠️ Nearest expiry: {r['nearest_expiry']} ({d} days)"
+            expiry_line = f"\n⚠️ Nearest expiry: {str(r['nearest_expiry'])[:10]} ({d} days)"
         else:
-            expiry_line = f"\n📅 Nearest expiry: {r['nearest_expiry']} ({d} days)"
+            expiry_line = f"\n📅 Nearest expiry: {str(r['nearest_expiry'])[:10]}"
     return f"""**{r['generic_name']}** ({r['brand_name']}) — {r['formulation']} {r['strength']}
 
 | Field | Value |
