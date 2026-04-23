@@ -1,7 +1,8 @@
 import os
 import re
-import sqlite3
+import psycopg2
 import pandas as pd
+from psycopg2 import pool
 import gradio as gr
 from neo4j import GraphDatabase
 from openai import OpenAI
@@ -18,50 +19,41 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ── Google Sheets URLs ───────────────────────────────────────
-GSHEETS = {
-    "inventory":      "https://docs.google.com/spreadsheets/d/e/2PACX-1vSuQUvKPyOqk0sA_ZAyaRWq-UMYF46LFbq8CsC_DoMRI0dFvmlCZQXzvSqbwhBbvlbzEATeaZkBpMRb/pub?gid=1137099812&single=true&output=csv",
-    "batches":        "https://docs.google.com/spreadsheets/d/e/2PACX-1vT34_Sgc4vqMIuJBgqZjXaOQUh0t-szhtn_BtTHpInCjtVdKWkQVH2sDFGlRuJM2MKUQTJeGxig_6J7/pub?output=csv",
-    "drug_knowledge": "https://docs.google.com/spreadsheets/d/e/2PACX-1vSCDPUMOJkkSd8akLZqzVjnA2mvUlx_-LQ1iNb4_lfiv7SEth83z3XLvClLszhVCIqFZhaOQduP4pss/pub?gid=1825550262&single=true&output=csv",
-    "suppliers":      "https://docs.google.com/spreadsheets/d/e/2PACX-1vRaeIlgs5eMSmM2bgzkFKbVS0pjtNQLe4Ld9FV6VFO70gwYdEKI_Zg7XJVOMr8V-cw2IXxaAIr72dxI/pub?gid=1026952429&single=true&output=csv",
-    "interactions":   "https://docs.google.com/spreadsheets/d/e/2PACX-1vSe4IhGRb7CaTET89fk8Lq2K-k43P-QuX7Ti4QRJD2ZB_MNSB2fD__r24MAQuiQ9S1A88mMcylOl054/pub?gid=1479162872&single=true&output=csv",
-    "transactions":   "https://docs.google.com/spreadsheets/d/e/2PACX-1vSP6jAMxMBbQp2nX4rSp_dxi1aXw4y9FQFqfLU6Wz2PhG-9jIn_sSXkBqDAba7086YKv4G3lrzEHtmd/pub?gid=823501153&single=true&output=csv",
-}
+# ── Supabase PostgreSQL connection ───────────────────────────
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
 
-# ── Build SQLite from Google Sheets on startup ────────────────
-DB_PATH = "sunrise_pharmacy.db"
+# Connection pool — thread safe, reuses connections efficiently
+_pool = None
 
-def build_database():
-    """
-    Loads data from Google Sheets published CSV URLs into SQLite.
-    To update data: edit the Google Sheet — changes reflect on next app restart.
-    To swap to PostgreSQL: replace get_conn() with psycopg2.connect()
-    """
-    conn = sqlite3.connect(DB_PATH)
-    for table_name, url in GSHEETS.items():
-        try:
-            df = pd.read_csv(url)
-            df.to_sql(table_name, conn, if_exists="replace", index=False)
-            print(f"✓ Loaded {len(df)} rows into {table_name}")
-        except Exception as e:
-            print(f"⚠ Failed to load {table_name}: {e}")
-    conn.commit()
-    conn.close()
-    print("Database ready ✓")
+def get_pool():
+    global _pool
+    if _pool is None:
+        _pool = pool.ThreadedConnectionPool(1, 10, SUPABASE_URL)
+    return _pool
 
-build_database()
-
-# ── Thread-safe SQLite connection ─────────────────────────────
 def get_conn():
-    return sqlite3.connect(DB_PATH)
+    """
+    Returns a live PostgreSQL connection from the pool.
+    Every query reads directly from Supabase — always current data.
+    To update data: edit Google Sheets → run the loader script → data updates instantly.
+    """
+    return get_pool().getconn()
+
+def release_conn(conn):
+    get_pool().putconn(conn)
+
+print("Supabase connection pool ready ✓")
 
 # ── Load drug list ────────────────────────────────────────────
 def get_all_drugs():
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         df = pd.read_sql_query(
             "SELECT generic_name, brand_name, category FROM inventory ORDER BY generic_name",
             conn
         )
+    finally:
+        release_conn(conn)
     return df
 
 DRUGS_DF   = get_all_drugs()
@@ -262,7 +254,7 @@ def format_stock_price(question):
     if not keywords:
         return "❌ Please specify a drug name to check stock."
     conditions = " OR ".join(
-        ["LOWER(generic_name) LIKE ? OR LOWER(brand_name) LIKE ?" for _ in keywords]
+        ["LOWER(generic_name) LIKE %s OR LOWER(brand_name) LIKE %s" for _ in keywords]
     )
     params = []
     for k in keywords:
@@ -273,8 +265,11 @@ def format_stock_price(question):
                cost_price_usd, shelf_location, category
         FROM inventory WHERE {conditions} LIMIT 5
     """
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         df = pd.read_sql_query(sql, conn, params=params)
+    finally:
+        release_conn(conn)
     if df.empty:
         return "❌ Drug not found in inventory. Please check the spelling or use the Drug Lookup."
     lines = []
@@ -320,11 +315,14 @@ def format_category_browse(question):
     sql = """
         SELECT generic_name, brand_name, formulation, strength,
                quantity_in_stock, selling_price_usd, shelf_location
-        FROM inventory WHERE category = ?
+        FROM inventory WHERE category = %s
         ORDER BY generic_name
     """
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         df = pd.read_sql_query(sql, conn, params=(matched,))
+    finally:
+        release_conn(conn)
     if df.empty:
         return f"❌ No drugs found in category: {matched}"
     header = f"**{matched}** — {len(df)} drugs\n\n"
@@ -350,8 +348,11 @@ def format_stats():
         FROM inventory
         GROUP BY category ORDER BY inventory_value DESC
     """
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         df = pd.read_sql_query(sql, conn)
+    finally:
+        release_conn(conn)
     total_drugs = df['drug_count'].sum()
     total_value = df['inventory_value'].sum()
     header = f"**Inventory Summary** — {total_drugs} products across {len(df)} categories\n\n"
@@ -375,8 +376,11 @@ def format_low_stock():
         WHERE quantity_in_stock <= reorder_level
         ORDER BY stock_pct ASC
     """
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         df = pd.read_sql_query(sql, conn)
+    finally:
+        release_conn(conn)
     if df.empty:
         return "✅ **Good news** — all products are currently above their reorder levels. No drugs are running low at this time."
     header = f"⚠️ **{len(df)} drug(s) at or below reorder level:**\n\n"
@@ -407,8 +411,11 @@ def format_expiry(question):
             WHERE julianday(b.expiry_date) - julianday('now') <= 90
             ORDER BY b.expiry_date ASC
         """
-        with get_conn() as conn:
+        conn = get_conn()
+        try:
             df = pd.read_sql_query(sql, conn)
+        finally:
+            release_conn(conn)
         if df.empty:
             return "✅ No batches expiring within the next 90 days."
         header = f"**Batches expiring within 90 days** — {len(df)} batch(es):\n\n"
@@ -432,7 +439,7 @@ def format_expiry(question):
         keywords = extract_keywords(question)
         if not keywords:
             return "❌ Please specify a drug name to check expiry."
-        conditions = " OR ".join(["LOWER(i.generic_name) LIKE ?" for _ in keywords])
+        conditions = " OR ".join(["LOWER(i.generic_name) LIKE %s" for _ in keywords])
         params = [f"%{k}%" for k in keywords]
         sql = f"""
             SELECT i.generic_name, i.brand_name, b.batch_number,
@@ -444,8 +451,11 @@ def format_expiry(question):
             WHERE {conditions}
             ORDER BY b.expiry_date ASC
         """
-        with get_conn() as conn:
+        conn = get_conn()
+        try:
             df = pd.read_sql_query(sql, conn, params=params)
+        finally:
+            release_conn(conn)
         if df.empty:
             return "❌ No batch records found for that drug."
         header = "| Drug | Brand | Batch | Expiry Date | Days Left | Qty |\n"
@@ -479,8 +489,11 @@ def format_sales(question):
             GROUP BY customer_type
             ORDER BY total_revenue DESC
         """
-        with get_conn() as conn:
+        conn = get_conn()
+        try:
             df = pd.read_sql_query(sql, conn)
+        finally:
+            release_conn(conn)
         header = "**Sales by Customer Type** (Last 30 days)\n\n"
         header += "| Customer Type | Transactions | Units Sold | Revenue | % of Total |\n"
         header += "|---|---|---|---|---|\n"
@@ -503,8 +516,11 @@ def format_sales(question):
             GROUP BY i.brand_name, i.generic_name
             ORDER BY total_revenue DESC LIMIT 10
         """
-        with get_conn() as conn:
+        conn = get_conn()
+        try:
             df = pd.read_sql_query(sql, conn)
+        finally:
+            release_conn(conn)
         header = "**Top 10 Selling Drugs** (Last 30 days)\n\n"
         header += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n"
         header += "|---|---|---|---|---|---|\n"
@@ -553,9 +569,12 @@ def format_alternative(question):
     keywords = extract_keywords(question)
     search_param = None
     for k in keywords:
-        sql_check = "SELECT generic_name, category FROM inventory WHERE LOWER(generic_name) LIKE ? LIMIT 1"
-        with get_conn() as conn:
+        sql_check = "SELECT generic_name, category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1"
+        conn = get_conn()
+        try:
             result = pd.read_sql_query(sql_check, conn, params=(f"%{k}%",))
+        finally:
+            release_conn(conn)
         if not result.empty:
             search_param = f"%{k}%"
             drug_name = result.iloc[0]['generic_name']
@@ -568,14 +587,17 @@ def format_alternative(question):
                quantity_in_stock, selling_price_usd, shelf_location
         FROM inventory
         WHERE category = (
-            SELECT category FROM inventory WHERE LOWER(generic_name) LIKE ? LIMIT 1
+            SELECT category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1
         )
-        AND LOWER(generic_name) NOT LIKE ?
+        AND LOWER(generic_name) NOT LIKE %s
         AND quantity_in_stock > 0
         ORDER BY generic_name
     """
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         df = pd.read_sql_query(sql, conn, params=(search_param, search_param))
+    finally:
+        release_conn(conn)
     if df.empty:
         return f"❌ No alternatives found in the same category as {drug_name}."
     header = f"**Alternatives to {drug_name}** (same category: {category})\n\n"
@@ -602,11 +624,14 @@ def format_drug_summary(drug_name):
                AS days_to_expiry
         FROM inventory i
         LEFT JOIN batches b ON i.product_id = b.product_id
-        WHERE LOWER(i.generic_name) LIKE LOWER(?)
+        WHERE LOWER(i.generic_name) LIKE LOWER(%s)
         GROUP BY i.product_id LIMIT 1
     """
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         df = pd.read_sql_query(sql, conn, params=(f"%{drug_name}%",))
+    finally:
+        release_conn(conn)
     if df.empty:
         return f"❌ **{drug_name}** not found in inventory. Please check the spelling."
     r = df.iloc[0]
@@ -848,8 +873,6 @@ def filter_drugs(search_text):
 def respond(message, chat_history, search_history):
     if not message or message.strip() == "":
         return "", chat_history, search_history, gr.update(), gr.update()
-
-    build_database()  # refresh from Google Sheets on every query
 
     conversation_history = [
         {"role": t["role"], "content": t["content"]}

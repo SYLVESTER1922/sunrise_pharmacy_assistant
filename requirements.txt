@@ -2,3 +2,4 @@ gradio
 neo4j
 openai
 pandas
+psycopg2-binary
