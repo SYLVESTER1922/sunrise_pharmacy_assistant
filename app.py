@@ -15,34 +15,36 @@ NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-driver = GraphDatabase.driver(
-    NEO4J_URI,
-    auth=(NEO4J_USERNAME, NEO4J_PASSWORD),
-    max_connection_lifetime=200,
-    keep_alive=True
-)
+driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ── Build SQLite from CSVs on startup ─────────────────────────
+# ── Google Sheets URLs ───────────────────────────────────────
+GSHEETS = {
+    "inventory":      "https://docs.google.com/spreadsheets/d/e/2PACX-1vSuQUvKPyOqk0sA_ZAyaRWq-UMYF46LFbq8CsC_DoMRI0dFvmlCZQXzvSqbwhBbvlbzEATeaZkBpMRb/pub?gid=1137099812&single=true&output=csv",
+    "batches":        "https://docs.google.com/spreadsheets/d/e/2PACX-1vT34_Sgc4vqMIuJBgqZjXaOQUh0t-szhtn_BtTHpInCjtVdKWkQVH2sDFGlRuJM2MKUQTJeGxig_6J7/pub?output=csv",
+    "drug_knowledge": "https://docs.google.com/spreadsheets/d/e/2PACX-1vSCDPUMOJkkSd8akLZqzVjnA2mvUlx_-LQ1iNb4_lfiv7SEth83z3XLvClLszhVCIqFZhaOQduP4pss/pub?gid=1825550262&single=true&output=csv",
+    "suppliers":      "https://docs.google.com/spreadsheets/d/e/2PACX-1vRaeIlgs5eMSmM2bgzkFKbVS0pjtNQLe4Ld9FV6VFO70gwYdEKI_Zg7XJVOMr8V-cw2IXxaAIr72dxI/pub?gid=1026952429&single=true&output=csv",
+    "interactions":   "https://docs.google.com/spreadsheets/d/e/2PACX-1vSe4IhGRb7CaTET89fk8Lq2K-k43P-QuX7Ti4QRJD2ZB_MNSB2fD__r24MAQuiQ9S1A88mMcylOl054/pub?gid=1479162872&single=true&output=csv",
+    "transactions":   "https://docs.google.com/spreadsheets/d/e/2PACX-1vSP6jAMxMBbQp2nX4rSp_dxi1aXw4y9FQFqfLU6Wz2PhG-9jIn_sSXkBqDAba7086YKv4G3lrzEHtmd/pub?gid=823501153&single=true&output=csv",
+}
+
+# ── Build SQLite from Google Sheets on startup ────────────────
 DB_PATH = "sunrise_pharmacy.db"
 
 def build_database():
+    """
+    Loads data from Google Sheets published CSV URLs into SQLite.
+    To update data: edit the Google Sheet — changes reflect on next app restart.
+    To swap to PostgreSQL: replace get_conn() with psycopg2.connect()
+    """
     conn = sqlite3.connect(DB_PATH)
-    tables = {
-        "inventory":      "sunrise_pharmacy_inventory_pricing.csv",
-        "batches":        "sunrise_pharmacy_batch_expiry.csv",
-        "suppliers":      "sunrise_pharmacy_suppliers.csv",
-        "drug_knowledge": "sunrise_pharmacy_drug_knowledge.csv",
-        "interactions":   "sunrise_pharmacy_drug_interactions.csv",
-        "transactions":   "sunrise_pharmacy_transactions_last_30_days.csv",
-    }
-    for table_name, filename in tables.items():
-        if os.path.exists(filename):
-            df = pd.read_csv(filename)
+    for table_name, url in GSHEETS.items():
+        try:
+            df = pd.read_csv(url)
             df.to_sql(table_name, conn, if_exists="replace", index=False)
             print(f"✓ Loaded {len(df)} rows into {table_name}")
-        else:
-            print(f"⚠ File not found: {filename}")
+        except Exception as e:
+            print(f"⚠ Failed to load {table_name}: {e}")
     conn.commit()
     conn.close()
     print("Database ready ✓")
@@ -95,7 +97,7 @@ def fuzzy_correct_question(question):
     corrected_words = list(words)
     for i, word in enumerate(words):
         w = word.lower()
-        if len(w) < 4 or w in skip_words or w.isdigit():
+        if len(w) < 4 or w in skip_words:
             continue
         match = fuzzy_match_drug(w, threshold=78)
         if match and match.lower() != w:
@@ -125,15 +127,10 @@ def classify_intent(question, conversation_history=None):
         return "thanks"
     if any(g in q_clean for g in FAREWELLS):
         return "farewell"
-# Interaction — always takes priority, checked before followup
-    if any(w in q for w in [
-        "interact", "interaction", "safe with", "combine",
-        "take with", "used with", "avoid with", "contraindic"
-    ]):
-        return "interaction"
+
     # Follow-up detection
     followup_refs = [
-        "it","these", "those", "them", "they",
+        "it", "this", "that", "these", "those", "them", "they",
         "the same", "above", "mentioned", "you said", "tell me more",
         "more about", "elaborate", "go on", "continue", "what else",
         "expand", "in detail", "and what about", "how about",
@@ -142,23 +139,6 @@ def classify_intent(question, conversation_history=None):
     if (conversation_history and len(q.split()) <= 8 and
             any(ref in q_clean for ref in followup_refs)):
         return "followup"
-        # CATEGORY BROWSE — must come before stock_price
-    if any(w in q for w in [
-        "antiretroviral", "arvs", "arv", "hiv drugs",
-        "antibiotic", "analgesic", "antihypertensive",
-        "antidiabetic", "antimalarial", "antifungal",
-        "list all", "show all", "all antibiotics",
-        "all antiretrovirals", "all analgesics"
-    ]):
-        return "category_browse"
-
-    # STATS — must come before stock_price
-    if any(w in q for w in [
-        "how many drug", "how many categor", "drug categor",
-        "how many types", "inventory summary", "stock summary",
-        "inventory overview", "categories we have"
-    ]):
-        return "stats"
 
     # LOW STOCK — must come before stock_price
     if any(w in q for w in [
@@ -233,10 +213,9 @@ def classify_intent(question, conversation_history=None):
         "sold", "sales", "revenue", "dispensed", "transaction",
         "top selling", "best selling", "most popular", "most sold",
         "highest revenue", "performance", "turnover",
-        "selling drugs", "selling brands", "selling products",
-        "top drugs", "top brands", "top products", "top medicines",
-        "selling medicines", "selling items", "best drugs",
-        "best brands", "best medicines", "top performers"
+        "customer type", "customer breakdown", "by customer",
+        "breakdown", "split by", "prescription sales",
+        "walk-in", "insurance sales"
     ]):
         return "sales"
 
@@ -514,58 +493,19 @@ def format_sales(question):
         footer = f"\n**Total Revenue: ${total:,.2f}**"
         return header + "\n".join(rows) + footer
     else:
-        # Extract number — digits and written numbers
-        number_words = {
-            "one":1,"two":2,"three":3,"four":4,"five":5,
-            "six":6,"seven":7,"eight":8,"nine":9,"ten":10
-        }
-        numbers = re.findall(r'\b(\d+)\b', question)
-        limit = int(numbers[0]) if numbers else None
-        if not limit:
-            for word, num in number_words.items():
-                if word in q:
-                    limit = num
-                    break
-        limit = limit or 10
-        limit = max(1, min(limit, 50))
-
-        # Detect sort direction
-        if any(w in q for w in [
-            "least", "lowest", "bottom", "worst", "slow",
-            "poor", "less", "fewest", "minimum", "last"
-        ]):
-            order = "ASC"
-            direction_label = f"Bottom {limit}"
-        else:
-            order = "DESC"
-            direction_label = f"Top {limit}"
-
-        # Detect sort column
-        if any(w in q for w in ["unit", "quantity", "volume", "dispensed"]):
-            sort_col = "total_units"
-            sort_label = "by units sold"
-        elif any(w in q for w in ["transaction", "frequency", "times"]):
-            sort_col = "num_transactions"
-            sort_label = "by number of transactions"
-        else:
-            sort_col = "total_revenue"
-            sort_label = "by revenue"
-
-        sql = f"""
-            SELECT i.brand_name,
-                   i.generic_name,
+        sql = """
+            SELECT i.brand_name, i.generic_name,
                    SUM(t.quantity_sold)          AS total_units,
                    ROUND(SUM(t.total_amount), 2) AS total_revenue,
                    COUNT(*)                       AS num_transactions
             FROM transactions t
             JOIN inventory i ON t.product_id = i.product_id
             GROUP BY i.brand_name, i.generic_name
-            ORDER BY {sort_col} {order}
-            LIMIT ?
+            ORDER BY total_revenue DESC LIMIT 10
         """
         with get_conn() as conn:
-            df = pd.read_sql_query(sql, conn, params=(limit,))
-        header = f"**{direction_label} Selling Drugs** {sort_label} (Last 30 days)\n\n"
+            df = pd.read_sql_query(sql, conn)
+        header = "**Top 10 Selling Drugs** (Last 30 days)\n\n"
         header += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n"
         header += "|---|---|---|---|---|---|\n"
         rows = [
@@ -713,7 +653,7 @@ ABSOLUTE RULES — violating these is not permitted under any circumstances:
 4. Never add interactions, contraindications or side effects not explicitly present in the data.
 5. Keep the answer to 3-5 sentences. Be precise and factual.
 6. For interactions, always state the exact severity level from the data (Minor/Moderate/Major).
-7. 7. End every answer with: "Source: pharmacy knowledge graph"
+7. End every answer with: "Source: [data source name]"
 """
 
 def generate_clinical_answer(question, intent, source, data, conversation_history=None):
