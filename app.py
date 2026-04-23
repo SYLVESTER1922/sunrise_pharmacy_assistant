@@ -404,7 +404,7 @@ def format_expiry(question):
         sql = """
             SELECT i.generic_name, i.brand_name, b.batch_number,
                    b.expiry_date, b.quantity_remaining,
-                   EXTRACT(DAY FROM (b.expiry_date::date - CURRENT_DATE))::INTEGER
+                   (b.expiry_date::date - CURRENT_DATE)::INTEGER
                    AS days_remaining
             FROM batches b
             JOIN inventory i ON b.product_id = i.product_id
@@ -444,7 +444,7 @@ def format_expiry(question):
         sql = f"""
             SELECT i.generic_name, i.brand_name, b.batch_number,
                    b.expiry_date, b.quantity_remaining,
-                   EXTRACT(DAY FROM (b.expiry_date::date - CURRENT_DATE))::INTEGER
+                   (b.expiry_date::date - CURRENT_DATE)::INTEGER
                    AS days_remaining
             FROM batches b
             JOIN inventory i ON b.product_id = i.product_id
@@ -620,7 +620,7 @@ def format_drug_summary(drug_name):
                i.selling_price_usd, i.cost_price_usd,
                i.shelf_location, i.category,
                MIN(b.expiry_date) AS nearest_expiry,
-               EXTRACT(DAY FROM (MIN(b.expiry_date::date) - CURRENT_DATE))::INTEGER
+               (MIN(b.expiry_date::date) - CURRENT_DATE)::INTEGER
                AS days_to_expiry
         FROM inventory i
         LEFT JOIN batches b ON i.product_id = b.product_id
