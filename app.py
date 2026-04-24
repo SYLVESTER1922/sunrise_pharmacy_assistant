@@ -1511,12 +1511,14 @@ def respond(message, chat_history, search_history):
     search_history = search_history[:15]
     history_md = "\n".join([f"- {h}" for h in search_history])
 
+    summary = summarize_response(full_answer) if full_answer else ""
     return (
         "",
         chat_history,
         search_history,
         gr.update(choices=search_history, value=None),
-        gr.update(value=history_md)
+        gr.update(value=history_md),
+        summary
     )
 
 def drug_summary_respond(drug_name, chat_history, search_history):
@@ -1650,7 +1652,6 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             )
             with gr.Row():
                 export_btn   = gr.Button("📥 Export Chat", variant="secondary", scale=1)
-                read_btn     = gr.Button("📋 Summarize", variant="secondary", scale=1)
                 export_file  = gr.File(label="Download", scale=2, visible=False)
 
         # ── RIGHT sidebar — Questions & History ───────────────
@@ -1677,10 +1678,10 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     submit.click(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
     msg.submit(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
 
     def transcribe_audio(audio_path, chat_history, search_history):
         if not audio_path:
@@ -1698,16 +1699,16 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     audio_input.stop_recording(transcribe_audio,
         [audio_input, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
 
     history_dropdown.change(reask_from_history,
         [history_dropdown, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
 
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
         btn.click(click_quick_question,
             [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
-            [msg, chatbot, search_history_state, history_dropdown, history_display])
+            [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
 
     # Drug chips removed
 
@@ -1721,22 +1722,9 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         f = export_chat(chat_history)
         return gr.update(value=f, visible=True) if f else gr.update(visible=False)
 
-    def do_summarize(chat_history):
-        if not chat_history:
-            return ""
-        try:
-            last = chat_history[-1]
-            if isinstance(last, dict):
-                last_response = last.get("content", "")
-            elif isinstance(last, (list, tuple)):
-                last_response = last[1] if len(last) > 1 else str(last[0])
-            else:
-                last_response = str(last)
-            return summarize_response(last_response)
-        except Exception:
-            return ""
+
 
     export_btn.click(do_export, [chatbot], [export_file])
-    read_btn.click(do_summarize, [chatbot], [summary_box])
+
 
 demo.launch()
