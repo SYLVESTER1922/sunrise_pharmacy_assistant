@@ -1652,16 +1652,16 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
                     label="🎤 Voice Input (click to record)",
                     visible=True
                 )
-            with gr.Row():
-                export_btn   = gr.Button("📥 Export Chat", variant="secondary", scale=1)
-                read_btn     = gr.Button("🔊 Read Last Response", variant="secondary", scale=1)
-                export_file  = gr.File(label="Download", scale=2, visible=False)
             audio_output = gr.Audio(
                 label="🔊 Audio Response",
                 autoplay=True,
                 visible=False,
                 type="filepath"
             )
+            with gr.Row():
+                export_btn   = gr.Button("📥 Export Chat", variant="secondary", scale=1)
+                read_btn     = gr.Button("🔊 Read Aloud", variant="secondary", scale=1)
+                export_file  = gr.File(label="Download", scale=2, visible=False)
 
         # ── RIGHT sidebar — Questions & History ───────────────
         with gr.Column(scale=1, min_width=200):
@@ -1724,7 +1724,8 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     drug_search.change(filter_drugs, [drug_search], [drug_dropdown])
     drug_lookup_btn.click(drug_summary_respond,
         [drug_dropdown, chatbot, search_history_state],
-        [chatbot, search_history_state, history_dropdown, history_display])
+        [chatbot, search_history_state, history_dropdown, history_display],
+        scroll_to_output=True)
 
     def do_export(chat_history):
         f = export_chat(chat_history)
