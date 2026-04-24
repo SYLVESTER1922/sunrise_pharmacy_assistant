@@ -1466,11 +1466,10 @@ def text_to_speech(text):
             input=clean
         )
         tmp = _tmp.NamedTemporaryFile(delete=False, suffix=".mp3")
-        tmp.write(response.content)
-        tmp.flush()
-        tmp.close()
+        response.stream_to_file(tmp.name)
         return tmp.name
-    except Exception:
+    except Exception as tts_err:
+        print(f"TTS Error: {tts_err}")
         return None
 
 # ── Drug search filter ────────────────────────────────────────
@@ -1748,6 +1747,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             audio_file = text_to_speech(last_response)
             return gr.update(value=audio_file, visible=True) if audio_file else gr.update(visible=False)
         except Exception as e:
+            print(f"Read Aloud Error: {e}")
             return gr.update(visible=False)
 
     export_btn.click(do_export, [chatbot], [export_file])
