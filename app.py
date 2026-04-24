@@ -1511,7 +1511,7 @@ def respond(message, chat_history, search_history):
 
 def drug_summary_respond(drug_name, chat_history, search_history):
     if not drug_name:
-        return chat_history, search_history, gr.update(), gr.update()
+        return chat_history, search_history, gr.update(), gr.update(), ""
     try:
         answer = format_drug_summary(drug_name)
         header = "*📦 Operational data — inventory + batch records*\n\n"
@@ -1531,7 +1531,8 @@ def drug_summary_respond(drug_name, chat_history, search_history):
         chat_history,
         search_history,
         gr.update(choices=search_history, value=None),
-        gr.update(value=history_md)
+        gr.update(value=history_md),
+        ""  # clear brief_box
     )
 
 def click_quick_question(question, chat_history, search_history):
@@ -1708,7 +1709,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     drug_search.change(filter_drugs, [drug_search], [drug_dropdown])
     drug_lookup_btn.click(drug_summary_respond,
         [drug_dropdown, chatbot, search_history_state],
-        [chatbot, search_history_state, history_dropdown, history_display],
+        [chatbot, search_history_state, history_dropdown, history_display, brief_box],
         scroll_to_output=True)
 
     def do_export(chat_history):
