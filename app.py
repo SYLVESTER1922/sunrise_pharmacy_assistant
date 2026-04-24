@@ -119,12 +119,7 @@ def classify_intent(question, conversation_history=None):
         return "thanks"
     if any(g in q_clean for g in FAREWELLS):
         return "farewell"
-# Interaction — always takes priority over followup
-    if any(w in q for w in [
-        "interact", "interaction", "safe with", "combine",
-        "take with", "used with", "avoid with", "contraindic"
-    ]):
-        return "interaction"
+
     # Follow-up detection
     followup_refs = [
         "it", "this", "that", "these", "those", "them", "they",
@@ -136,6 +131,17 @@ def classify_intent(question, conversation_history=None):
     if (conversation_history and len(q.split()) <= 8 and
             any(ref in q_clean for ref in followup_refs)):
         return "followup"
+
+    # CATEGORY BROWSE — must come before stock_price
+    if any(w in q for w in [
+        "list all", "show all", "all antibiotics", "all antiretrovirals",
+        "all analgesics", "all antihypertensives", "all antidiabetics",
+        "all antimalarials", "all antifungals", "all respiratory",
+        "list antibiotics", "list antiretrovirals", "list analgesics",
+        "list antidiabetics", "list antimalarials", "list antifungals",
+        "show antibiotics", "show antiretrovirals"
+    ]):
+        return "category_browse"
 
     # LOW STOCK — must come before stock_price
     if any(w in q for w in [
@@ -196,6 +202,14 @@ def classify_intent(question, conversation_history=None):
     ]):
         return "interaction"
 
+    # Drug info explicit questions — bypass followup
+    if any(w in q for w in [
+        "dose", "dosage", "used for", "indication", "side effect",
+        "contraindication", "what is", "tell me about", "drug class",
+        "prescribed for", "treats"
+    ]):
+        return "drug_info"
+
     # SUPPLIER
     if any(w in q for w in [
         "supplier", "order from", "who supply", "distributor",
@@ -213,9 +227,8 @@ def classify_intent(question, conversation_history=None):
         "customer type", "customer breakdown", "by customer",
         "breakdown", "split by", "prescription sales",
         "walk-in", "insurance sales",
-        "least selling", "least sold", "slow moving",
-        "slowest", "worst selling", "bottom selling",
-        "least popular", "lowest selling"
+        "last day", "yesterday", "latest day",
+        "most recent day", "last transaction"
     ]):
         return "sales"
 
@@ -431,7 +444,7 @@ def format_expiry(question):
         header += "|---|---|---|---|---|---|---|\n"
         rows = []
         for _, r in df.iterrows():
-            if r['days_remaining'] <= 30:
+            if r['days_remaining'] < 30:
                 status = "🚨 URGENT"
             elif r['days_remaining'] <= 60:
                 status = "⚠️ Warning"
@@ -439,7 +452,7 @@ def format_expiry(question):
                 status = "📅 Monitor"
             rows.append(
                 f"| {r['generic_name']} | {r['brand_name']} | {r['batch_number']} | "
-                f"{r['expiry_date']} | **{r['days_remaining']}** | "
+                f"{str(r['expiry_date'])[:10]} | **{r['days_remaining']}** | "
                 f"{r['quantity_remaining']} | {status} |"
             )
         return header + "\n".join(rows)
@@ -480,6 +493,8 @@ def format_expiry(question):
 
 def format_sales(question):
     q = question.lower()
+
+    # Customer type breakdown
     if any(w in q for w in [
         "customer type", "customer breakdown", "by customer",
         "breakdown", "split", "prescription", "walk-in",
@@ -511,115 +526,128 @@ def format_sales(question):
             for _, r in df.iterrows()
         ]
         total = df['total_revenue'].sum()
-        footer = f"\n**Total Revenue: ${total:,.2f}**"
-        return header + "\n".join(rows) + footer
-    else:
-        sql = """
+        return header + "\n".join(rows) + f"\n\n**Total Revenue: ${total:,.2f}**"
+
+    # Last day / most recent day sales
+    if any(w in q for w in [
+        "last day", "yesterday", "latest day", "most recent day",
+        "last transaction", "recent sales", "today"
+    ]):
+        sql_date = """
+            SELECT date,
+                   COUNT(*)                           AS num_transactions,
+                   SUM(quantity_sold)                 AS total_units,
+                   ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
+            FROM transactions
+            WHERE date = (SELECT MAX(date) FROM transactions)
+            GROUP BY date
+        """
+        sql_drugs = """
             SELECT i.brand_name, i.generic_name,
-                   SUM(t.quantity_sold)          AS total_units,
-                   ROUND(SUM(t.total_amount)::numeric, 2) AS total_revenue,
-                   COUNT(*)                       AS num_transactions
+                   SUM(t.quantity_sold)                   AS units,
+                   ROUND(SUM(t.total_amount)::numeric, 2) AS revenue
             FROM transactions t
             JOIN inventory i ON t.product_id = i.product_id
+            WHERE t.date = (SELECT MAX(date) FROM transactions)
             GROUP BY i.brand_name, i.generic_name
-            ORDER BY total_revenue DESC LIMIT 10
+            ORDER BY revenue DESC
+        """
+        sql_ctype = """
+            SELECT customer_type,
+                   ROUND(SUM(total_amount)::numeric, 2) AS revenue
+            FROM transactions
+            WHERE date = (SELECT MAX(date) FROM transactions)
+            GROUP BY customer_type ORDER BY revenue DESC
         """
         conn = get_conn()
         try:
-            df = pd.read_sql_query(sql, conn)
+            df_d  = pd.read_sql_query(sql_date, conn)
+            df_dr = pd.read_sql_query(sql_drugs, conn)
+            df_ct = pd.read_sql_query(sql_ctype, conn)
         finally:
             release_conn(conn)
-        header = "**Top 10 Selling Drugs** (Last 30 days)\n\n"
-        header += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n"
-        header += "|---|---|---|---|---|---|\n"
-        rows = [
-            f"| {i+1} | {r['brand_name']} | {r['generic_name']} | "
-            f"{r['total_units']} | ${r['total_revenue']:,.2f} | {r['num_transactions']} |"
-            for i, (_, r) in enumerate(df.iterrows())
+        if df_d.empty:
+            return "No transactions found."
+        r = df_d.iloc[0]
+        header  = f"**Sales for {str(r['date'])[:10]}** (Last recorded day)\n\n"
+        header += f"Transactions: **{r['num_transactions']}** | "
+        header += f"Units Sold: **{r['total_units']}** | "
+        header += f"Revenue: **${r['total_revenue']:,.2f}**\n\n"
+        header += "**By Drug:**\n\n| Brand | Generic | Units | Revenue |\n|---|---|---|---|\n"
+        drug_rows = [
+            f"| {row['brand_name']} | {row['generic_name']} | "
+            f"{row['units']} | ${row['revenue']:,.2f} |"
+            for _, row in df_dr.iterrows()
         ]
-        return header + "\n".join(rows)
-
-def format_supplier(question):
-    keywords = extract_keywords(question)
-    search_term = keywords[0] if keywords else get_search_term(question)
-    cypher = """
-        MATCH (d:Drug)-[:SUPPLIED_BY]->(s:Supplier)
-        WHERE toLower(d.generic_name) CONTAINS toLower($search)
-        RETURN d.generic_name AS drug, s.name AS supplier,
-               s.contact AS contact, s.phone AS phone,
-               s.city AS city, s.lead_time AS lead_time_days,
-               s.payment_terms AS payment_terms
-        LIMIT 5
-    """
-    with driver.session() as session:
-        results = [dict(r) for r in session.run(cypher, search=search_term)]
-    if not results:
-        return "❌ No supplier information found for that drug."
-    lines = [f"**Supplier information for {results[0]['drug']}:**\n"]
-    seen = set()
-    for r in results:
-        key = r['supplier']
-        if key in seen:
-            continue
-        seen.add(key)
-        lines.append(f"""| Field | Value |
-|---|---|
-| Supplier | **{r['supplier']}** |
-| Contact | {r['contact']} |
-| Phone | {r['phone']} |
-| City | {r['city']} |
-| Lead Time | {r['lead_time_days']} days |
-| Payment Terms | {r['payment_terms']} |
-""")
-    return "\n".join(lines)
-
-def format_alternative(question):
-    keywords = extract_keywords(question)
-    search_param = None
-    for k in keywords:
-        sql_check = "SELECT generic_name, category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1"
-        conn = get_conn()
-        try:
-            result = pd.read_sql_query(sql_check, conn, params=(f"%{k}%",))
-        finally:
-            release_conn(conn)
-        if not result.empty:
-            search_param = f"%{k}%"
-            drug_name = result.iloc[0]['generic_name']
-            category = result.iloc[0]['category']
-            break
-    if not search_param:
-        return "❌ Drug not found in inventory. Please check the spelling."
-    sql = """
-        SELECT generic_name, brand_name, formulation, strength,
-               quantity_in_stock, selling_price_usd, shelf_location
-        FROM inventory
-        WHERE category = (
-            SELECT category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1
+        ctype = "\n\n**By Customer Type:** " + " | ".join(
+            [f"{row['customer_type']}: ${row['revenue']:,.2f}"
+             for _, row in df_ct.iterrows()]
         )
-        AND LOWER(generic_name) NOT LIKE %s
-        AND quantity_in_stock > 0
-        ORDER BY generic_name
+        return header + "\n".join(drug_rows) + ctype
+
+    # Default — top/bottom selling with number and direction extraction
+    number_words = {
+        "one":1,"two":2,"three":3,"four":4,"five":5,
+        "six":6,"seven":7,"eight":8,"nine":9,"ten":10
+    }
+    numbers = re.findall(r'\b(\d+)\b', question)
+    limit = int(numbers[0]) if numbers else None
+    if not limit:
+        for word, num in number_words.items():
+            if word in q:
+                limit = num
+                break
+    limit = limit or 10
+    limit = max(1, min(limit, 50))
+
+    # Detect direction
+    if any(w in q for w in [
+        "least", "lowest", "bottom", "worst", "slow",
+        "poor", "less", "fewest", "minimum"
+    ]):
+        order = "ASC"
+        direction_label = f"Bottom {limit}"
+    else:
+        order = "DESC"
+        direction_label = f"Top {limit}"
+
+    # Detect sort column
+    if any(w in q for w in ["unit", "quantity", "volume", "dispensed"]):
+        sort_col = "total_units"
+        sort_label = "by units sold"
+    elif any(w in q for w in ["transaction", "frequency", "times"]):
+        sort_col = "num_transactions"
+        sort_label = "by transactions"
+    else:
+        sort_col = "total_revenue"
+        sort_label = "by revenue"
+
+    sql = f"""
+        SELECT i.brand_name, i.generic_name,
+               SUM(t.quantity_sold)          AS total_units,
+               ROUND(SUM(t.total_amount)::numeric, 2) AS total_revenue,
+               COUNT(*)                       AS num_transactions
+        FROM transactions t
+        JOIN inventory i ON t.product_id = i.product_id
+        GROUP BY i.brand_name, i.generic_name
+        ORDER BY {sort_col} {order}
+        LIMIT %s
     """
     conn = get_conn()
     try:
-        df = pd.read_sql_query(sql, conn, params=(search_param, search_param))
+        df = pd.read_sql_query(sql, conn, params=(limit,))
     finally:
         release_conn(conn)
-    if df.empty:
-        return f"❌ No alternatives found in the same category as {drug_name}."
-    header = f"**Alternatives to {drug_name}** (same category: {category})\n\n"
-    header += "| Drug | Brand | Form | Strength | Stock | Price | Shelf |\n"
-    header += "|---|---|---|---|---|---|---|\n"
+    header  = f"**{direction_label} Selling Drugs** {sort_label} (Last 30 days)\n\n"
+    header += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n"
+    header += "|---|---|---|---|---|---|\n"
     rows = [
-        f"| {r['generic_name']} | {r['brand_name']} | {r['formulation']} | "
-        f"{r['strength']} | {r['quantity_in_stock']} | ${r['selling_price_usd']} | "
-        f"{r['shelf_location']} |"
-        for _, r in df.iterrows()
+        f"| {i+1} | {r['brand_name']} | {r['generic_name']} | "
+        f"{r['total_units']} | ${r['total_revenue']:,.2f} | {r['num_transactions']} |"
+        for i, (_, r) in enumerate(df.iterrows())
     ]
-    disclaimer = ("\n\n⚠️ **Clinical Note:** Therapeutic substitution must be approved "
-                  "by a qualified pharmacist. This list shows drugs in the same category only.")
-    return header + "\n".join(rows) + disclaimer
+    return header + "\n".join(rows)
+
 
 def format_drug_summary(drug_name):
     sql = """
@@ -633,11 +661,7 @@ def format_drug_summary(drug_name):
         FROM inventory i
         LEFT JOIN batches b ON i.product_id = b.product_id
         WHERE LOWER(i.generic_name) LIKE LOWER(%s)
-        GROUP BY i.product_id, i.generic_name, i.brand_name, i.formulation, 
-         i.strength, i.quantity_in_stock, i.reorder_level,
-         i.selling_price_usd, i.cost_price_usd, i.shelf_location, 
-         i.category
-LIMIT 1
+        GROUP BY i.product_id LIMIT 1
     """
     conn = get_conn()
     try:
@@ -652,11 +676,11 @@ LIMIT 1
     if r.get("days_to_expiry") is not None:
         d = r['days_to_expiry']
         if d <= 30:
-            expiry_line = f"\n🚨 **URGENT:** Nearest batch expires in {d} days ({r['nearest_expiry']})"
+            expiry_line = f"\n🚨 **URGENT:** Nearest batch expires in {d} days ({str(r['nearest_expiry'])[:10]})"
         elif d <= 90:
             expiry_line = f"\n⚠️ Nearest expiry: {str(r['nearest_expiry'])[:10]} ({d} days)"
         else:
-            expiry_line = f"\n📅 Nearest expiry: {str(r['nearest_expiry'])[:10]}"
+            expiry_line = f"\n📅 Nearest expiry: {str(r['nearest_expiry'])[:10]} ({d} days)"
     return f"""**{r['generic_name']}** ({r['brand_name']}) — {r['formulation']} {r['strength']}
 
 | Field | Value |
@@ -690,7 +714,7 @@ ABSOLUTE RULES — violating these is not permitted under any circumstances:
 4. Never add interactions, contraindications or side effects not explicitly present in the data.
 5. Keep the answer to 3-5 sentences. Be precise and factual.
 6. For interactions, always state the exact severity level from the data (Minor/Moderate/Major).
-7. End every answer with: "Source: [data source name]"
+7. End every answer with the actual source name, for example: "Source: drug knowledge graph" or "Source: drug interaction knowledge graph".
 """
 
 def generate_clinical_answer(question, intent, source, data, conversation_history=None):
