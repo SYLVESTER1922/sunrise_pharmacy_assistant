@@ -1734,9 +1734,19 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     def do_read_aloud(chat_history):
         if not chat_history:
             return gr.update(visible=False)
-        last_response = chat_history[-1]["content"] if chat_history else ""
-        audio_file = text_to_speech(last_response)
-        return gr.update(value=audio_file, visible=True) if audio_file else gr.update(visible=False)
+        try:
+            last = chat_history[-1]
+            # Handle both dict format {"role":..,"content":..} and tuple format [user, assistant]
+            if isinstance(last, dict):
+                last_response = last.get("content", "")
+            elif isinstance(last, (list, tuple)):
+                last_response = last[1] if len(last) > 1 else str(last[0])
+            else:
+                last_response = str(last)
+            audio_file = text_to_speech(last_response)
+            return gr.update(value=audio_file, visible=True) if audio_file else gr.update(visible=False)
+        except Exception as e:
+            return gr.update(visible=False)
 
     export_btn.click(do_export, [chatbot], [export_file])
     read_btn.click(do_read_aloud, [chatbot], [audio_output])
