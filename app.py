@@ -1451,13 +1451,12 @@ def export_chat(chat_history):
 import tempfile
 
 def summarize_response(text):
-    """Strip markdown and return clean plain text summary"""
-    import re as _re
-    clean = _re.sub(r'[#*|_`]', '', text)
-    clean = _re.sub(r'\[.*?\]\(.*?\)', '', clean)
-    clean = _re.sub(r'-{3,}', '', clean)
-    clean = _re.sub(r'\n+', ' ', clean)
-    clean = _re.sub(r'\s+', ' ', clean).strip()
+    import re
+    clean = re.sub(r"[#*|_`]", "", text)
+    clean = re.sub(r"\[.*?\]\(.*?\)", "", clean)
+    clean = re.sub(r"-{3,}", "", clean)
+    clean = re.sub(r"\n+", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
     if len(clean) > 400:
         clean = clean[:400] + "..."
     return clean
@@ -1644,8 +1643,8 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
                     visible=True
                 )
             summary_box = gr.Textbox(
-                label="📋 Plain Text Summary",
-                visible=False,
+                label="📋 Plain Text Summary — click Summarize after any response",
+                placeholder="Click 📋 Summarize to see a plain text version of the last response",
                 interactive=False,
                 lines=3
             )
@@ -1724,7 +1723,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     def do_summarize(chat_history):
         if not chat_history:
-            return gr.update(visible=False, value="")
+            return ""
         try:
             last = chat_history[-1]
             if isinstance(last, dict):
@@ -1733,10 +1732,9 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
                 last_response = last[1] if len(last) > 1 else str(last[0])
             else:
                 last_response = str(last)
-            summary = summarize_response(last_response)
-            return gr.update(visible=True, value=summary)
+            return summarize_response(last_response)
         except Exception:
-            return gr.update(visible=False, value="")
+            return ""
 
     export_btn.click(do_export, [chatbot], [export_file])
     read_btn.click(do_summarize, [chatbot], [summary_box])
