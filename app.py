@@ -1450,27 +1450,17 @@ def export_chat(chat_history):
 # ── Text to Speech ───────────────────────────────────────────
 import tempfile
 
-def text_to_speech(text):
-    """Convert answer to audio using OpenAI TTS — strips markdown first"""
-    try:
-        import re as _re, tempfile as _tmp
-        clean = _re.sub(r'[#*|_`]', '', text)
-        clean = _re.sub(r'\[.*?\]\(.*?\)', '', clean)
-        clean = _re.sub(r'-{3,}', '', clean)
-        clean = ' '.join(clean.split())
-        if len(clean) > 800:
-            clean = clean[:800] + ". For full details please see the chat."
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice="nova",
-            input=clean
-        )
-        tmp = _tmp.NamedTemporaryFile(delete=False, suffix=".mp3")
-        response.stream_to_file(tmp.name)
-        return tmp.name
-    except Exception as tts_err:
-        print(f"TTS Error: {tts_err}")
-        return None
+def summarize_response(text):
+    """Strip markdown and return clean plain text summary"""
+    import re as _re
+    clean = _re.sub(r'[#*|_`]', '', text)
+    clean = _re.sub(r'\[.*?\]\(.*?\)', '', clean)
+    clean = _re.sub(r'-{3,}', '', clean)
+    clean = _re.sub(r'\n+', ' ', clean)
+    clean = _re.sub(r'\s+', ' ', clean).strip()
+    if len(clean) > 400:
+        clean = clean[:400] + "..."
+    return clean
 
 # ── Drug search filter ────────────────────────────────────────
 def filter_drugs(search_text):
@@ -1653,15 +1643,15 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
                     label="🎤 Voice Input (click to record)",
                     visible=True
                 )
-            audio_output = gr.Audio(
-                label="🔊 Audio Response",
-                autoplay=True,
+            summary_box = gr.Textbox(
+                label="📋 Plain Text Summary",
                 visible=False,
-                type="filepath"
+                interactive=False,
+                lines=3
             )
             with gr.Row():
                 export_btn   = gr.Button("📥 Export Chat", variant="secondary", scale=1)
-                read_btn     = gr.Button("🔊 Read Aloud", variant="secondary", scale=1)
+                read_btn     = gr.Button("📋 Summarize", variant="secondary", scale=1)
                 export_file  = gr.File(label="Download", scale=2, visible=False)
 
         # ── RIGHT sidebar — Questions & History ───────────────
@@ -1732,25 +1722,23 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         f = export_chat(chat_history)
         return gr.update(value=f, visible=True) if f else gr.update(visible=False)
 
-    def do_read_aloud(chat_history):
+    def do_summarize(chat_history):
         if not chat_history:
-            return gr.update(visible=False)
+            return gr.update(visible=False, value="")
         try:
             last = chat_history[-1]
-            # Handle both dict format {"role":..,"content":..} and tuple format [user, assistant]
             if isinstance(last, dict):
                 last_response = last.get("content", "")
             elif isinstance(last, (list, tuple)):
                 last_response = last[1] if len(last) > 1 else str(last[0])
             else:
                 last_response = str(last)
-            audio_file = text_to_speech(last_response)
-            return gr.update(value=audio_file, visible=True) if audio_file else gr.update(visible=False)
-        except Exception as e:
-            print(f"Read Aloud Error: {e}")
-            return gr.update(visible=False)
+            summary = summarize_response(last_response)
+            return gr.update(visible=True, value=summary)
+        except Exception:
+            return gr.update(visible=False, value="")
 
     export_btn.click(do_export, [chatbot], [export_file])
-    read_btn.click(do_read_aloud, [chatbot], [audio_output])
+    read_btn.click(do_summarize, [chatbot], [summary_box])
 
 demo.launch()
