@@ -157,7 +157,8 @@ def classify_intent(question, conversation_history=None):
     if any(w in q for w in [
         "stock", "have", "available", "availability", "quantity",
         "how many", "price", "cost", "how much", "in stock",
-        "do we have", "do you have", "shelf"
+        "do we have", "do you have", "shelf",
+        "cheapest", "most expensive", "lowest price", "highest price"
     ]):
         return "stock_price"
 
@@ -182,15 +183,17 @@ def classify_intent(question, conversation_history=None):
         "how many categories", "how many drug", "drug categories",
         "total drugs", "drug types", "categories we have",
         "how many do we have", "inventory summary", "stock summary",
-        "inventory overview", "stock overview"
+        "inventory overview", "stock overview", "how many drug categories",
+        "how many do we stock", "categories do we stock", "categories do we have"
     ]):
         return "stats"
 
     # EXPIRY
     if any(w in q for w in [
         "expir", "expire", "expiry", "batch", "shelf life",
-        "best before", "use by", "when does",
-        "most urgent", "urgent batch", "needs action", "critical batch"
+        "best before", "use by", "when does", "days until",
+        "most urgent", "urgent batch", "needs action", "critical batch",
+        "when will", "how long until"
     ]):
         return "expiry"
 
@@ -222,7 +225,8 @@ def classify_intent(question, conversation_history=None):
         "supplier", "order from", "who supply", "distributor",
         "vendor", "supplies", "supply", "who provides",
         "where do we order", "procurement", "purchase from",
-        "buy from", "source"
+        "buy from", "source", "shortest lead", "fastest lead",
+        "how many suppliers", "suppliers in", "lead time"
     ]):
         return "supplier"
 
@@ -235,15 +239,20 @@ def classify_intent(question, conversation_history=None):
         "breakdown", "split by", "prescription sales",
         "walk-in", "insurance sales",
         "last day", "yesterday", "latest day",
-        "most recent day", "last transaction"
+        "most recent day", "last transaction",
+        "monday", "tuesday", "wednesday", "thursday",
+        "friday", "saturday", "sunday",
+        "last week", "this week", "past week",
+        "best performing", "best category"
     ]):
         return "sales"
 
-    # ALTERNATIVES
+    # ALTERNATIVES — check BEFORE drug_info
     if any(w in q for w in [
         "alternative", "substitute", "instead of", "replace",
         "similar to", "other option", "other drug", "swap",
-        "equivalent", "whats another", "what else can"
+        "equivalent", "whats another", "what else can",
+        "what can replace", "what can i use instead"
     ]):
         return "alternative"
 
@@ -300,6 +309,41 @@ def format_stock_price(question):
         release_conn(conn)
     if df.empty:
         return "❌ Drug not found in inventory. Please check the spelling or use the Drug Lookup."
+    # Cheapest / most expensive
+    if any(w in q for w in ["cheapest", "lowest price", "least expensive"]):
+        cat_match = None
+        for kw, cat in categories.items():
+            if kw in q:
+                cat_match = cat
+                break
+        sql_c = "SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory"
+        sql_c += (" WHERE category = %s" if cat_match else "")
+        sql_c += " ORDER BY selling_price_usd ASC LIMIT 5"
+        conn = get_conn()
+        try:
+            df_c = pd.read_sql_query(sql_c, conn, params=(cat_match,) if cat_match else None)
+        finally:
+            release_conn(conn)
+        if df_c.empty:
+            return "❌ No drugs found."
+        label = f"cheapest {cat_match}" if cat_match else "cheapest drugs"
+        header = f"**Top 5 {label}:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
+        rows = [f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | {r['quantity_in_stock']} | {r['shelf_location']} |" for _, r in df_c.iterrows()]
+        return header + "\n".join(rows)
+
+    if any(w in q for w in ["most expensive", "highest price", "most costly"]):
+        sql_e = "SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory ORDER BY selling_price_usd DESC LIMIT 5"
+        conn = get_conn()
+        try:
+            df_e = pd.read_sql_query(sql_e, conn)
+        finally:
+            release_conn(conn)
+        if df_e.empty:
+            return "❌ No drugs found."
+        header = "**Top 5 most expensive drugs:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
+        rows = [f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | {r['quantity_in_stock']} | {r['shelf_location']} |" for _, r in df_e.iterrows()]
+        return header + "\n".join(rows)
+
     lines = []
     for _, r in df.iterrows():
         stock_flag = "⚠️ LOW STOCK" if r['quantity_in_stock'] <= r['reorder_level'] else "✅ In Stock"
@@ -535,6 +579,71 @@ def format_sales(question):
         total = df['total_revenue'].sum()
         return header + "\n".join(rows) + f"\n\n**Total Revenue: ${total:,.2f}**"
 
+    # Day of week query — "how much did we make on Saturday"
+    day_map = {
+        "monday": 1, "tuesday": 2, "wednesday": 3, "thursday": 4,
+        "friday": 5, "saturday": 6, "sunday": 0
+    }
+    matched_day = None
+    matched_day_name = None
+    for day_name, day_num in day_map.items():
+        if day_name in q:
+            matched_day = day_num
+            matched_day_name = day_name.capitalize()
+            break
+
+    if matched_day is not None:
+        sql_day = """
+            SELECT date,
+                   COUNT(*)                           AS num_transactions,
+                   SUM(quantity_sold)                 AS total_units,
+                   ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
+            FROM transactions
+            WHERE EXTRACT(DOW FROM date::date) = %s
+            GROUP BY date ORDER BY date DESC LIMIT 4
+        """
+        conn = get_conn()
+        try:
+            df_day = pd.read_sql_query(sql_day, conn, params=(matched_day,))
+        finally:
+            release_conn(conn)
+        if df_day.empty:
+            return f"No transactions found for {matched_day_name}s."
+        header = f"**{matched_day_name} Sales**\n\n"
+        header += "| Date | Transactions | Units | Revenue |\n|---|---|---|---|\n"
+        rows = [
+            f"| {str(r['date'])[:10]} | {r['num_transactions']} | {r['total_units']} | ${r['total_revenue']:,.2f} |"
+            for _, r in df_day.iterrows()
+        ]
+        total = df_day['total_revenue'].sum()
+        return header + "\n".join(rows) + f"\n\n**Total {matched_day_name} Revenue: ${total:,.2f}**"
+
+    # Last week query
+    if any(w in q for w in ["last week", "this week", "past week"]):
+        sql_week = """
+            SELECT date,
+                   COUNT(*)                           AS num_transactions,
+                   SUM(quantity_sold)                 AS total_units,
+                   ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
+            FROM transactions
+            WHERE date::date >= (SELECT MAX(date::date) - 7 FROM transactions)
+            GROUP BY date ORDER BY date DESC
+        """
+        conn = get_conn()
+        try:
+            df_week = pd.read_sql_query(sql_week, conn)
+        finally:
+            release_conn(conn)
+        if df_week.empty:
+            return "No transactions found for last week."
+        header = "**Last Week Sales**\n\n| Date | Transactions | Units | Revenue |\n|---|---|---|---|\n"
+        rows = [
+            f"| {str(r['date'])[:10]} | {r['num_transactions']} | {r['total_units']} | ${r['total_revenue']:,.2f} |"
+            for _, r in df_week.iterrows()
+        ]
+        total = df_week['total_revenue'].sum()
+        return header + "\n".join(rows) + f"\n\n**Total: ${total:,.2f}**"
+
     # Last day / most recent day sales
     if any(w in q for w in [
         "last day", "yesterday", "latest day", "most recent day",
@@ -658,7 +767,42 @@ def format_sales(question):
 
 
 def format_supplier(question):
-    """Supplier lookup — operational data from Neo4j"""
+    """Supplier lookup — handles drug lookup, lead time, city queries"""
+    q = question.lower()
+
+    # Shortest/fastest lead time query
+    if any(w in q for w in ["shortest", "fastest", "quickest", "best lead", "minimum lead"]):
+        cypher = """
+            MATCH (s:Supplier)
+            RETURN s.name AS supplier, s.lead_time AS lead_time_days,
+                   s.city AS city, s.contact AS contact, s.phone AS phone
+            ORDER BY s.lead_time ASC LIMIT 3
+        """
+        with driver.session() as session:
+            results = [dict(r) for r in session.run(cypher)]
+        if not results:
+            return "❌ No supplier information found."
+        header = "**Suppliers with shortest lead times:**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
+        rows = [f"| {r['supplier']} | {r['lead_time_days']} days | {r['city']} | {r['contact']} |" for r in results]
+        return header + "\n".join(rows)
+
+    # City/location query
+    if any(w in q for w in ["harare", "bulawayo", "mutare", "city", "location", "how many suppliers"]):
+        cypher = """
+            MATCH (s:Supplier)
+            RETURN s.city AS city, count(s) AS supplier_count,
+                   collect(s.name) AS suppliers
+            ORDER BY supplier_count DESC
+        """
+        with driver.session() as session:
+            results = [dict(r) for r in session.run(cypher)]
+        if not results:
+            return "❌ No supplier information found."
+        header = "**Suppliers by City:**\n\n| City | Count | Suppliers |\n|---|---|---|\n"
+        rows = [f"| {r['city']} | {r['supplier_count']} | {', '.join(r['suppliers'])} |" for r in results]
+        return header + "\n".join(rows)
+
+    # Default drug supplier lookup
     keywords = extract_keywords(question)
     search_term = keywords[0] if keywords else get_search_term(question)
     cypher = """
@@ -970,16 +1114,16 @@ def respond(message, chat_history, search_history):
 
         if mode == "system":
             full_answer = answer
+        elif intent == "followup":
+            full_answer = answer  # no header for followups
         elif mode == "operational":
             header = f"*📦 Operational data — {source}*\n\n"
-            full_answer = header + answer
-            if correction_note:
-                full_answer = f"{correction_note}\n\n{full_answer}"
+            body = answer
+            full_answer = f"{correction_note}\n\n{header}{body}" if correction_note else f"{header}{body}"
         else:  # clinical
             header = f"*🧪 Clinical data — {source}*\n\n"
-            full_answer = header + answer
-            if correction_note:
-                full_answer = f"{correction_note}\n\n{full_answer}"
+            body = answer
+            full_answer = f"{correction_note}\n\n{header}{body}" if correction_note else f"{header}{body}"
 
     except Exception as e:
         full_answer = f"An error occurred: {str(e)}\nPlease try rephrasing your question."
@@ -1108,13 +1252,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         # ── CENTRE — Chat ─────────────────────────────────────
         with gr.Column(scale=3, min_width=400):
             chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460)
-            gr.Markdown("**💊 Quick Drug Lookup** — click for instant summary:")
-            with gr.Row():
-                drug_chips = [gr.Button(d, variant="secondary", size="sm")
-                              for d in FEATURED_DRUGS[:5]]
-            with gr.Row():
-                drug_chips2 = [gr.Button(d, variant="secondary", size="sm")
-                               for d in FEATURED_DRUGS[5:]]
+            # Drug chips removed — use Drug Lookup sidebar
             with gr.Row():
                 msg    = gr.Textbox(
                     placeholder="Ask by drug name e.g. 'Do we have Amoxicillin?' or 'What interacts with Metformin?'",
@@ -1164,12 +1302,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
             [msg, chatbot, search_history_state, history_dropdown, history_display])
 
-    all_chips = list(zip(drug_chips, FEATURED_DRUGS[:5])) + \
-                list(zip(drug_chips2, FEATURED_DRUGS[5:]))
-    for chip, drug_name in all_chips:
-        chip.click(drug_summary_respond,
-            [gr.Textbox(value=drug_name, visible=False), chatbot, search_history_state],
-            [chatbot, search_history_state, history_dropdown, history_display])
+    # Drug chips removed
 
     drug_search.change(filter_drugs, [drug_search], [drug_dropdown])
     drug_lookup_btn.click(drug_summary_respond,
