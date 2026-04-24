@@ -202,6 +202,13 @@ def classify_intent(question, conversation_history=None):
     ]):
         return "interaction"
 
+    # Sales explicit — check before drug_info to catch "what are the X least/top selling"
+    if any(w in q for w in [
+        "top selling", "least selling", "best selling", "worst selling",
+        "top drugs", "least drugs", "bottom selling", "slow moving"
+    ]):
+        return "sales"
+
     # Drug info explicit questions — bypass followup
     if any(w in q for w in [
         "dose", "dosage", "used for", "indication", "side effect",
@@ -649,6 +656,41 @@ def format_sales(question):
     return header + "\n".join(rows)
 
 
+
+def format_supplier(question):
+    """Supplier lookup — operational data from Neo4j"""
+    keywords = extract_keywords(question)
+    search_term = keywords[0] if keywords else get_search_term(question)
+    cypher = """
+        MATCH (d:Drug)-[:SUPPLIED_BY]->(s:Supplier)
+        WHERE toLower(d.generic_name) CONTAINS toLower($search)
+        RETURN d.generic_name AS drug, s.name AS supplier,
+               s.contact AS contact, s.phone AS phone,
+               s.city AS city, s.lead_time AS lead_time_days,
+               s.payment_terms AS payment_terms
+        LIMIT 5
+    """
+    with driver.session() as session:
+        results = [dict(r) for r in session.run(cypher, search=search_term)]
+    if not results:
+        return "❌ No supplier information found for that drug."
+    lines = [f"**Supplier information for {results[0]['drug']}:**\n"]
+    seen = set()
+    for r in results:
+        if r['supplier'] in seen:
+            continue
+        seen.add(r['supplier'])
+        lines.append(f"""| Field | Value |
+|---|---|
+| Supplier | **{r['supplier']}** |
+| Contact | {r['contact']} |
+| Phone | {r['phone']} |
+| City | {r['city']} |
+| Lead Time | {r['lead_time_days']} days |
+| Payment Terms | {r['payment_terms']} |
+""")
+    return "\n".join(lines)
+
 def format_drug_summary(drug_name):
     sql = """
         SELECT i.generic_name, i.brand_name, i.formulation, i.strength,
@@ -661,7 +703,11 @@ def format_drug_summary(drug_name):
         FROM inventory i
         LEFT JOIN batches b ON i.product_id = b.product_id
         WHERE LOWER(i.generic_name) LIKE LOWER(%s)
-        GROUP BY i.product_id LIMIT 1
+        GROUP BY i.product_id, i.generic_name, i.brand_name, i.formulation,
+                 i.strength, i.quantity_in_stock, i.reorder_level,
+                 i.selling_price_usd, i.cost_price_usd, i.shelf_location,
+                 i.category
+        LIMIT 1
     """
     conn = get_conn()
     try:
