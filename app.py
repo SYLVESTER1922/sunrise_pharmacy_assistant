@@ -1450,17 +1450,6 @@ def export_chat(chat_history):
 # ── Text to Speech ───────────────────────────────────────────
 import tempfile
 
-def summarize_response(text):
-    import re
-    clean = re.sub(r"[#*|_`]", "", text)
-    clean = re.sub(r"\[.*?\]\(.*?\)", "", clean)
-    clean = re.sub(r"-{3,}", "", clean)
-    clean = re.sub(r"\n+", " ", clean)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    if len(clean) > 400:
-        clean = clean[:400] + "..."
-    return clean
-
 # ── Drug search filter ────────────────────────────────────────
 def filter_drugs(search_text):
     if not search_text or len(search_text) < 2:
@@ -1511,14 +1500,12 @@ def respond(message, chat_history, search_history):
     search_history = search_history[:15]
     history_md = "\n".join([f"- {h}" for h in search_history])
 
-    summary = summarize_response(full_answer) if full_answer else ""
     return (
         "",
         chat_history,
         search_history,
         gr.update(choices=search_history, value=None),
-        gr.update(value=history_md),
-        summary
+        gr.update(value=history_md)
     )
 
 def drug_summary_respond(drug_name, chat_history, search_history):
@@ -1630,13 +1617,21 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         with gr.Column(scale=3, min_width=400):
             chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True)
             # Drug chips removed
+            brief_box = gr.Textbox(
+                label="💡 Key Points",
+                placeholder="Ask a question then click Brief for a plain language summary",
+                interactive=False,
+                lines=2,
+                visible=True
+            )
             with gr.Row():
                 msg    = gr.Textbox(
                     placeholder="Ask e.g. 'Do we have Amoxicillin?' or 'Good morning' for daily briefing",
                     label="",
-                    scale=5
+                    scale=4
                 )
                 submit = gr.Button("Ask", variant="primary", scale=1)
+                brief_btn = gr.Button("💡 Brief", variant="secondary", scale=1)
             with gr.Row():
                 audio_input = gr.Audio(
                     sources=["microphone"],
@@ -1644,12 +1639,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
                     label="🎤 Voice Input (click to record)",
                     visible=True
                 )
-            summary_box = gr.Textbox(
-                label="📋 Plain Text Summary — click Summarize after any response",
-                placeholder="Click 📋 Summarize to see a plain text version of the last response",
-                interactive=False,
-                lines=3
-            )
+
             with gr.Row():
                 export_btn   = gr.Button("📥 Export Chat", variant="secondary", scale=1)
                 export_file  = gr.File(label="Download", scale=2, visible=False)
@@ -1678,10 +1668,10 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     submit.click(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
     msg.submit(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     def transcribe_audio(audio_path, chat_history, search_history):
         if not audio_path:
@@ -1699,16 +1689,16 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     audio_input.stop_recording(transcribe_audio,
         [audio_input, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     history_dropdown.change(reask_from_history,
         [history_dropdown, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
         btn.click(click_quick_question,
             [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
-            [msg, chatbot, search_history_state, history_dropdown, history_display, summary_box])
+            [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     # Drug chips removed
 
@@ -1724,7 +1714,37 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
 
 
+    def do_brief(chat_history):
+        """Generate a proper natural language brief using GPT"""
+        if not chat_history:
+            return "No response yet — ask a question first."
+        try:
+            last = chat_history[-1]
+            if isinstance(last, dict):
+                last_response = last.get("content", "")
+            elif isinstance(last, (list, tuple)):
+                last_response = last[1] if len(last) > 1 else ""
+            else:
+                last_response = str(last)
+            # Use GPT to generate a proper 2-3 sentence brief
+            prompt = f"""Summarise the following pharmacy data response in 2-3 clear sentences suitable for a pharmacy manager. Focus on the most important numbers and actionable insights. Do not use bullet points or markdown.
+
+Response:
+{last_response[:1500]}
+
+Brief summary:"""
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=150
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            return f"Could not generate brief: {str(e)}"
+
     export_btn.click(do_export, [chatbot], [export_file])
+    brief_btn.click(do_brief, [chatbot], [brief_box])
 
 
 demo.launch()
