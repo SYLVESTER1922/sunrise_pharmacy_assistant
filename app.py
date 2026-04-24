@@ -1466,7 +1466,9 @@ def text_to_speech(text):
             input=clean
         )
         tmp = _tmp.NamedTemporaryFile(delete=False, suffix=".mp3")
-        response.stream_to_file(tmp.name)
+        tmp.write(response.content)
+        tmp.flush()
+        tmp.close()
         return tmp.name
     except Exception:
         return None
