@@ -1505,7 +1505,8 @@ def respond(message, chat_history, search_history):
         chat_history,
         search_history,
         gr.update(choices=search_history, value=None),
-        gr.update(value=history_md)
+        gr.update(value=history_md),
+        ""  # clear brief_box on new question
     )
 
 def drug_summary_respond(drug_name, chat_history, search_history):
@@ -1668,37 +1669,39 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     submit.click(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
     msg.submit(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
 
     def transcribe_audio(audio_path, chat_history, search_history):
         if not audio_path:
-            return "", chat_history, search_history, gr.update(), gr.update()
+            return "", chat_history, search_history, gr.update(), gr.update(), gr.update(value=None), ""
         try:
-            import openai as _oa
             with open(audio_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1", file=f
                 )
             transcribed = transcript.text
-            return respond(transcribed, chat_history, search_history)
+            result = respond(transcribed, chat_history, search_history)
+            # result is (msg, chat, search, dropdown, history_md, brief)
+            # Add audio reset at end
+            return result[0], result[1], result[2], result[3], result[4], gr.update(value=None), result[5]
         except Exception as e:
-            return "", chat_history, search_history, gr.update(), gr.update()
+            return "", chat_history, search_history, gr.update(), gr.update(), gr.update(value=None), ""
 
     audio_input.stop_recording(transcribe_audio,
         [audio_input, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_input, brief_box])
 
     history_dropdown.change(reask_from_history,
         [history_dropdown, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
 
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
         btn.click(click_quick_question,
             [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
-            [msg, chatbot, search_history_state, history_dropdown, history_display])
+            [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
 
     # Drug chips removed
 
