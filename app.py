@@ -112,7 +112,7 @@ def classify_intent(question, conversation_history=None):
     q = question.lower().strip()
     q_clean = re.sub(r"['\u2019?!,.]", "", q)
 
-    # System intents
+    # ── System intents ────────────────────────────────────────
     if any(q_clean == g or q_clean.startswith(g) for g in GREETINGS):
         return "greeting"
     if any(g in q_clean for g in THANKS):
@@ -120,9 +120,77 @@ def classify_intent(question, conversation_history=None):
     if any(g in q_clean for g in FAREWELLS):
         return "farewell"
 
-    # Follow-up detection
+    # ── SALES explicit — before followup and stock_price ─────
+    if any(w in q for w in [
+        "top selling", "least selling", "best selling", "worst selling",
+        "bottom selling", "slow moving", "top drugs", "least drugs",
+        "last day", "yesterday", "latest day", "most recent day",
+        "last transaction", "recent sales",
+        "monday", "tuesday", "wednesday", "thursday",
+        "friday", "saturday", "sunday",
+        "last week", "this week", "past week",
+        "best performing category", "top category"
+    ]):
+        return "sales"
+
+    # ── SUPPLIER explicit — before stock_price ────────────────
+    if any(w in q for w in [
+        "supplier", "order from", "who supply", "distributor",
+        "vendor", "supplies", "supply", "who provides",
+        "where do we order", "procurement", "purchase from",
+        "buy from", "shortest lead", "fastest lead",
+        "how many suppliers", "suppliers in", "lead time",
+        "which supplier"
+    ]):
+        return "supplier"
+
+    # ── STATS explicit — before stock_price ──────────────────
+    if any(w in q for w in [
+        "how many drugs", "how many types", "how many medicines",
+        "how many categories", "how many drug", "drug categories",
+        "total drugs", "drug types", "categories we have",
+        "how many do we have", "inventory summary", "stock summary",
+        "inventory overview", "stock overview",
+        "how many drug categories", "how many do we stock",
+        "categories do we stock", "categories do we have"
+    ]):
+        return "stats"
+
+    # ── CHEAPEST/EXPENSIVE — before drug_info ───────────────
+    if any(w in q for w in [
+        "cheapest", "most expensive", "lowest price", "highest price",
+        "least expensive", "most costly"
+    ]):
+        return "stock_price"
+
+    # ── ALTERNATIVES explicit — before drug_info ─────────────
+    if any(w in q for w in [
+        "alternative", "substitute", "instead of", "replace",
+        "similar to", "other option", "other drug", "swap",
+        "equivalent", "whats another", "what else can",
+        "what can replace", "what can i use instead"
+    ]):
+        return "alternative"
+
+    # ── INTERACTION explicit — before followup ────────────────
+    if any(w in q for w in [
+        "interact", "interaction", "safe with", "combine", "mix",
+        "take with", "used with", "combined with",
+        "contraindic", "avoid with"
+    ]):
+        return "interaction"
+
+    # ── DRUG INFO explicit — before followup ──────────────────
+    if any(w in q for w in [
+        "dose", "dosage", "used for", "indication", "side effect",
+        "contraindication", "what is", "tell me about", "drug class",
+        "prescribed for", "treats", "what does", "what can"
+    ]):
+        return "drug_info"
+
+    # ── Follow-up detection ───────────────────────────────────
     followup_refs = [
-        "it", "this", "that", "these", "those", "them", "they",
+        "it", "these", "those", "them", "they",
         "the same", "above", "mentioned", "you said", "tell me more",
         "more about", "elaborate", "go on", "continue", "what else",
         "expand", "in detail", "and what about", "how about",
@@ -132,37 +200,7 @@ def classify_intent(question, conversation_history=None):
             any(ref in q_clean for ref in followup_refs)):
         return "followup"
 
-    # CATEGORY BROWSE — must come before stock_price
-    if any(w in q for w in [
-        "list all", "show all", "all antibiotics", "all antiretrovirals",
-        "all analgesics", "all antihypertensives", "all antidiabetics",
-        "all antimalarials", "all antifungals", "all respiratory",
-        "list antibiotics", "list antiretrovirals", "list analgesics",
-        "list antidiabetics", "list antimalarials", "list antifungals",
-        "show antibiotics", "show antiretrovirals"
-    ]):
-        return "category_browse"
-
-    # LOW STOCK — must come before stock_price
-    if any(w in q for w in [
-        "low stock", "running low", "almost out", "reorder",
-        "need to order", "below reorder", "critical stock",
-        "running low on stock", "low on stock", "need reorder",
-        "stock alert", "drugs running", "which drugs are",
-        "what drugs are", "what products are"
-    ]):
-        return "low_stock"
-
-    # STOCK / PRICE
-    if any(w in q for w in [
-        "stock", "have", "available", "availability", "quantity",
-        "how many", "price", "cost", "how much", "in stock",
-        "do we have", "do you have", "shelf",
-        "cheapest", "most expensive", "lowest price", "highest price"
-    ]):
-        return "stock_price"
-
-    # CATEGORY BROWSE
+    # ── CATEGORY BROWSE ───────────────────────────────────────
     if any(w in q for w in [
         "antibiotics", "antibiotic", "analgesics", "analgesic",
         "antihypertensives", "antihypertensive",
@@ -177,87 +215,47 @@ def classify_intent(question, conversation_history=None):
     ]):
         return "category_browse"
 
-    # STATS — must check before stock_price
+    # ── LOW STOCK ─────────────────────────────────────────────
     if any(w in q for w in [
-        "how many drugs", "how many types", "how many medicines",
-        "how many categories", "how many drug", "drug categories",
-        "total drugs", "drug types", "categories we have",
-        "how many do we have", "inventory summary", "stock summary",
-        "inventory overview", "stock overview", "how many drug categories",
-        "how many do we stock", "categories do we stock", "categories do we have"
+        "low stock", "running low", "almost out", "reorder",
+        "need to order", "below reorder", "critical stock",
+        "running low on stock", "low on stock", "need reorder",
+        "stock alert", "drugs running", "which drugs are",
+        "what drugs are", "what products are"
     ]):
-        return "stats"
+        return "low_stock"
 
-    # EXPIRY
+    # ── STOCK / PRICE ─────────────────────────────────────────
+    if any(w in q for w in [
+        "stock", "have", "available", "availability", "quantity",
+        "price", "cost", "how much", "in stock",
+        "do we have", "do you have", "shelf",
+        "cheapest", "most expensive", "lowest price", "highest price"
+    ]):
+        return "stock_price"
+
+    # ── EXPIRY ────────────────────────────────────────────────
     if any(w in q for w in [
         "expir", "expire", "expiry", "batch", "shelf life",
         "best before", "use by", "when does", "days until",
         "most urgent", "urgent batch", "needs action", "critical batch",
-        "when will", "how long until"
+        "when will", "how long until", "how many days"
     ]):
         return "expiry"
 
-    # INTERACTIONS — CLINICAL
-    if any(w in q for w in [
-        "interact", "interaction", "together", "combine", "mix",
-        "safe with", "take with", "used with", "combined with",
-        "contraindic", "avoid with"
-    ]):
-        return "interaction"
-
-    # Sales explicit — check before drug_info to catch "what are the X least/top selling"
-    if any(w in q for w in [
-        "top selling", "least selling", "best selling", "worst selling",
-        "top drugs", "least drugs", "bottom selling", "slow moving"
-    ]):
-        return "sales"
-
-    # Drug info explicit questions — bypass followup
-    if any(w in q for w in [
-        "dose", "dosage", "used for", "indication", "side effect",
-        "contraindication", "what is", "tell me about", "drug class",
-        "prescribed for", "treats"
-    ]):
-        return "drug_info"
-
-    # SUPPLIER
-    if any(w in q for w in [
-        "supplier", "order from", "who supply", "distributor",
-        "vendor", "supplies", "supply", "who provides",
-        "where do we order", "procurement", "purchase from",
-        "buy from", "source", "shortest lead", "fastest lead",
-        "how many suppliers", "suppliers in", "lead time"
-    ]):
-        return "supplier"
-
-    # SALES
+    # ── SALES ─────────────────────────────────────────────────
     if any(w in q for w in [
         "sold", "sales", "revenue", "dispensed", "transaction",
-        "top selling", "best selling", "most popular", "most sold",
         "highest revenue", "performance", "turnover",
         "customer type", "customer breakdown", "by customer",
         "breakdown", "split by", "prescription sales",
-        "walk-in", "insurance sales",
-        "last day", "yesterday", "latest day",
-        "most recent day", "last transaction",
-        "monday", "tuesday", "wednesday", "thursday",
-        "friday", "saturday", "sunday",
-        "last week", "this week", "past week",
-        "best performing", "best category"
+        "walk-in", "insurance sales"
     ]):
         return "sales"
 
-    # ALTERNATIVES — check BEFORE drug_info
-    if any(w in q for w in [
-        "alternative", "substitute", "instead of", "replace",
-        "similar to", "other option", "other drug", "swap",
-        "equivalent", "whats another", "what else can",
-        "what can replace", "what can i use instead"
-    ]):
-        return "alternative"
-
-    # DRUG INFO — CLINICAL (default)
+    # ── Default: drug info ────────────────────────────────────
     return "drug_info"
+
 
 # ── Keyword extractor ─────────────────────────────────────────
 STOPWORDS = {
@@ -309,41 +307,6 @@ def format_stock_price(question):
         release_conn(conn)
     if df.empty:
         return "❌ Drug not found in inventory. Please check the spelling or use the Drug Lookup."
-    # Cheapest / most expensive
-    if any(w in q for w in ["cheapest", "lowest price", "least expensive"]):
-        cat_match = None
-        for kw, cat in categories.items():
-            if kw in q:
-                cat_match = cat
-                break
-        sql_c = "SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory"
-        sql_c += (" WHERE category = %s" if cat_match else "")
-        sql_c += " ORDER BY selling_price_usd ASC LIMIT 5"
-        conn = get_conn()
-        try:
-            df_c = pd.read_sql_query(sql_c, conn, params=(cat_match,) if cat_match else None)
-        finally:
-            release_conn(conn)
-        if df_c.empty:
-            return "❌ No drugs found."
-        label = f"cheapest {cat_match}" if cat_match else "cheapest drugs"
-        header = f"**Top 5 {label}:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
-        rows = [f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | {r['quantity_in_stock']} | {r['shelf_location']} |" for _, r in df_c.iterrows()]
-        return header + "\n".join(rows)
-
-    if any(w in q for w in ["most expensive", "highest price", "most costly"]):
-        sql_e = "SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory ORDER BY selling_price_usd DESC LIMIT 5"
-        conn = get_conn()
-        try:
-            df_e = pd.read_sql_query(sql_e, conn)
-        finally:
-            release_conn(conn)
-        if df_e.empty:
-            return "❌ No drugs found."
-        header = "**Top 5 most expensive drugs:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
-        rows = [f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | {r['quantity_in_stock']} | {r['shelf_location']} |" for _, r in df_e.iterrows()]
-        return header + "\n".join(rows)
-
     lines = []
     for _, r in df.iterrows():
         stock_flag = "⚠️ LOW STOCK" if r['quantity_in_stock'] <= r['reorder_level'] else "✅ In Stock"
@@ -579,7 +542,7 @@ def format_sales(question):
         total = df['total_revenue'].sum()
         return header + "\n".join(rows) + f"\n\n**Total Revenue: ${total:,.2f}**"
 
-    # Day of week query — "how much did we make on Saturday"
+    # Day of week query
     day_map = {
         "monday": 1, "tuesday": 2, "wednesday": 3, "thursday": 4,
         "friday": 5, "saturday": 6, "sunday": 0
@@ -600,7 +563,7 @@ def format_sales(question):
                    ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
             FROM transactions
             WHERE EXTRACT(DOW FROM date::date) = %s
-            GROUP BY date ORDER BY date DESC LIMIT 4
+            GROUP BY date ORDER BY date DESC LIMIT 5
         """
         conn = get_conn()
         try:
@@ -767,42 +730,7 @@ def format_sales(question):
 
 
 def format_supplier(question):
-    """Supplier lookup — handles drug lookup, lead time, city queries"""
-    q = question.lower()
-
-    # Shortest/fastest lead time query
-    if any(w in q for w in ["shortest", "fastest", "quickest", "best lead", "minimum lead"]):
-        cypher = """
-            MATCH (s:Supplier)
-            RETURN s.name AS supplier, s.lead_time AS lead_time_days,
-                   s.city AS city, s.contact AS contact, s.phone AS phone
-            ORDER BY s.lead_time ASC LIMIT 3
-        """
-        with driver.session() as session:
-            results = [dict(r) for r in session.run(cypher)]
-        if not results:
-            return "❌ No supplier information found."
-        header = "**Suppliers with shortest lead times:**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
-        rows = [f"| {r['supplier']} | {r['lead_time_days']} days | {r['city']} | {r['contact']} |" for r in results]
-        return header + "\n".join(rows)
-
-    # City/location query
-    if any(w in q for w in ["harare", "bulawayo", "mutare", "city", "location", "how many suppliers"]):
-        cypher = """
-            MATCH (s:Supplier)
-            RETURN s.city AS city, count(s) AS supplier_count,
-                   collect(s.name) AS suppliers
-            ORDER BY supplier_count DESC
-        """
-        with driver.session() as session:
-            results = [dict(r) for r in session.run(cypher)]
-        if not results:
-            return "❌ No supplier information found."
-        header = "**Suppliers by City:**\n\n| City | Count | Suppliers |\n|---|---|---|\n"
-        rows = [f"| {r['city']} | {r['supplier_count']} | {', '.join(r['suppliers'])} |" for r in results]
-        return header + "\n".join(rows)
-
-    # Default drug supplier lookup
+    """Supplier lookup — operational data from Neo4j"""
     keywords = extract_keywords(question)
     search_term = keywords[0] if keywords else get_search_term(question)
     cypher = """
@@ -1115,7 +1043,7 @@ def respond(message, chat_history, search_history):
         if mode == "system":
             full_answer = answer
         elif intent == "followup":
-            full_answer = answer  # no header for followups
+            full_answer = answer
         elif mode == "operational":
             header = f"*📦 Operational data — {source}*\n\n"
             body = answer
