@@ -14,9 +14,25 @@ import json
 NEO4J_URI      = os.environ.get("NEO4J_URI")
 NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
+
+def get_driver():
+    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+
+def run_cypher(cypher, params=None):
+    """Run Cypher with auto-reconnect on stale connection."""
+    global driver
+    for attempt in range(2):
+        try:
+            with driver.session() as session:
+                return [dict(r) for r in session.run(cypher, **(params or {}))]
+        except Exception:
+            if attempt == 0:
+                driver = get_driver()
+            else:
+                raise
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+driver = get_driver()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ── Supabase PostgreSQL connection ───────────────────────────
@@ -129,7 +145,10 @@ def classify_intent(question, conversation_history=None):
         "monday", "tuesday", "wednesday", "thursday",
         "friday", "saturday", "sunday",
         "last week", "this week", "past week",
-        "best performing category", "top category"
+        "best performing category", "top category",
+        "by units sold", "by revenue", "by transactions",
+        "bottom 5", "bottom 3", "bottom 10", "top 5", "top 3", "top 10",
+        "most sold", "least sold", "best performer", "worst performer"
     ]):
         return "sales"
 
@@ -143,6 +162,37 @@ def classify_intent(question, conversation_history=None):
         "which supplier"
     ]):
         return "supplier"
+
+    # ── BRIEFING — daily morning summary ─────────────────────
+    if any(w in q for w in [
+        "good morning", "morning briefing", "daily briefing",
+        "daily summary", "morning summary", "start of day",
+        "what do i need to know", "briefing"
+    ]):
+        return "briefing"
+
+    # ── REORDER LIST ───────────────────────────────────────────
+    if any(w in q for w in [
+        "reorder list", "procurement list", "what to order",
+        "what do we need to order", "order list", "action list",
+        "what needs reordering", "reorder report"
+    ]):
+        return "reorder"
+
+    # ── FORECAST ──────────────────────────────────────────────
+    if any(w in q for w in [
+        "forecast", "projection", "predict", "how long will stock last",
+        "days of stock", "revenue forecast", "stock forecast",
+        "how long until", "when will we run out"
+    ]):
+        return "forecast"
+
+    # ── RECONCILIATION ────────────────────────────────────────
+    if any(w in q for w in [
+        "reconciliation", "reconcile", "discrepancy", "stock discrepancy",
+        "missing stock", "stock variance", "stock loss", "shrinkage"
+    ]):
+        return "reconciliation"
 
     # ── STATS explicit — before stock_price ──────────────────
     if any(w in q for w in [
@@ -820,8 +870,7 @@ def format_supplier(question):
                    s.city AS city, s.contact AS contact
             ORDER BY s.lead_time ASC LIMIT 3
         """
-        with driver.session() as session:
-            results = [dict(r) for r in session.run(cypher)]
+        results = run_cypher(cypher)
         if not results:
             return "❌ No supplier information found."
         header = "**Suppliers with shortest lead times:**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
@@ -835,8 +884,7 @@ def format_supplier(question):
                    collect(s.name) AS suppliers
             ORDER BY supplier_count DESC
         """
-        with driver.session() as session:
-            results = [dict(r) for r in session.run(cypher)]
+        results = run_cypher(cypher)
         if not results:
             return "❌ No supplier information found."
         header = "**Suppliers by City:**\n\n| City | Count | Suppliers |\n|---|---|---|\n"
@@ -859,8 +907,7 @@ def format_supplier(question):
                s.payment_terms AS payment_terms
         LIMIT 5
     """
-    with driver.session() as session:
-        results = [dict(r) for r in session.run(cypher, search=search_term)]
+    results = run_cypher(cypher, {"search": search_term})
     if not results:
         return "❌ No supplier information found for that drug."
     lines = [f"**Supplier information for {results[0]['drug']}:**\n"]
@@ -1002,8 +1049,7 @@ def query_neo4j_interaction(question):
             WHEN 'Minor' THEN 3 ELSE 4 END
         LIMIT 5
     """
-    with driver.session() as session:
-        return [dict(r) for r in session.run(cypher, search=search_term)]
+    return run_cypher(cypher, {"search": search_term})
 
 def query_neo4j_drug_info(question):
     keywords = extract_keywords(question)
@@ -1022,28 +1068,279 @@ def query_neo4j_drug_info(question):
                c.name AS category
         LIMIT 3
     """
-    with driver.session() as session:
-        return [dict(r) for r in session.run(cypher, search=search_term)]
+    return run_cypher(cypher, {"search": search_term})
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEW FEATURE 1: DAILY BRIEFING
+# ═══════════════════════════════════════════════════════════════
+def format_daily_briefing():
+    """Morning briefing — low stock + urgent expiry + yesterday revenue"""
+    from datetime import date as date_obj
+    today = date_obj.today().strftime("%A, %d %B %Y")
+
+    # Low stock
+    conn = get_conn()
+    try:
+        df_stock = pd.read_sql_query("""
+            SELECT generic_name, brand_name, quantity_in_stock, reorder_level,
+                   ROUND((quantity_in_stock::numeric/reorder_level)*100,0) AS pct
+            FROM inventory WHERE quantity_in_stock <= reorder_level
+            ORDER BY pct ASC LIMIT 5
+        """, conn)
+    finally:
+        release_conn(conn)
+
+    # Urgent expiry (< 30 days)
+    conn = get_conn()
+    try:
+        df_exp = pd.read_sql_query("""
+            SELECT i.generic_name, i.brand_name, b.batch_number,
+                   (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days_left,
+                   b.quantity_remaining
+            FROM batches b JOIN inventory i ON b.product_id = i.product_id
+            WHERE (b.expiry_date::date - CURRENT_DATE) <= 30
+            ORDER BY days_left ASC LIMIT 5
+        """, conn)
+    finally:
+        release_conn(conn)
+
+    # Yesterday revenue
+    conn = get_conn()
+    try:
+        df_rev = pd.read_sql_query("""
+            SELECT ROUND(SUM(total_amount)::numeric,2) AS revenue,
+                   COUNT(*) AS txns, SUM(quantity_sold) AS units
+            FROM transactions
+            WHERE date = (SELECT MAX(date) FROM transactions)
+        """, conn)
+        df_avg = pd.read_sql_query("""
+            SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily
+            FROM (SELECT date, SUM(total_amount) AS daily_rev
+                  FROM transactions GROUP BY date) t
+        """, conn)
+    finally:
+        release_conn(conn)
+
+    lines = [f"# 🌅 Good Morning! Daily Briefing — {today}\n"]
+
+    # Revenue summary
+    rev = df_rev.iloc[0]
+    avg = df_avg.iloc[0]['avg_daily']
+    trend = "📈 above" if rev['revenue'] > avg else "📉 below"
+    lines.append(f"## 💰 Yesterday's Revenue")
+    lines.append(f"**${rev['revenue']:,.2f}** ({rev['txns']} transactions, {rev['units']} units sold)")
+    lines.append(f"30-day average: **${avg:,.2f}** — Yesterday was {trend} average\n")
+
+    # Low stock
+    if df_stock.empty:
+        lines.append("## ✅ Stock Levels\nAll products above reorder level. No action needed.\n")
+    else:
+        lines.append(f"## 🔴 Low Stock Alert — {len(df_stock)} drug(s) need reordering")
+        lines.append("| Drug | Brand | Stock | Reorder | % |\n|---|---|---|---|---|")
+        for _, r in df_stock.iterrows():
+            lines.append(f"| {r['generic_name']} | {r['brand_name']} | **{r['quantity_in_stock']}** | {r['reorder_level']} | {r['pct']:.0f}% |")
+        lines.append("")
+
+    # Urgent expiry
+    if df_exp.empty:
+        lines.append("## ✅ Expiry Status\nNo batches expiring within 30 days.\n")
+    else:
+        lines.append(f"## 🚨 Urgent Expiry — {len(df_exp)} batch(es) expiring within 30 days")
+        lines.append("| Drug | Brand | Batch | Days Left | Qty |\n|---|---|---|---|---|")
+        for _, r in df_exp.iterrows():
+            lines.append(f"| {r['generic_name']} | {r['brand_name']} | {r['batch_number']} | **{r['days_left']}** | {r['quantity_remaining']} |")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEW FEATURE 2: REORDER ACTION LIST
+# ═══════════════════════════════════════════════════════════════
+def format_reorder_list():
+    """Complete procurement action list with suggested order quantities"""
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("""
+            SELECT i.generic_name, i.brand_name, i.quantity_in_stock,
+                   i.reorder_level, i.category,
+                   COALESCE(ROUND(SUM(t.quantity_sold)::numeric/30,1), 0) AS avg_daily_sales,
+                   CASE WHEN COALESCE(SUM(t.quantity_sold),0) > 0
+                        THEN (i.reorder_level * 2 - i.quantity_in_stock)
+                        ELSE (i.reorder_level * 2 - i.quantity_in_stock)
+                   END AS suggested_order
+            FROM inventory i
+            LEFT JOIN transactions t ON i.product_id = t.product_id
+            WHERE i.quantity_in_stock <= i.reorder_level
+            GROUP BY i.product_id, i.generic_name, i.brand_name,
+                     i.quantity_in_stock, i.reorder_level, i.category
+            ORDER BY (i.quantity_in_stock::float/i.reorder_level) ASC
+        """, conn)
+    finally:
+        release_conn(conn)
+
+    if df.empty:
+        return "✅ All products are above reorder level. No procurement action needed."
+
+    header = f"## 📋 Procurement Action List — {len(df)} drug(s) to reorder\n\n"
+    header += "| Drug | Brand | Current Stock | Reorder Level | Avg Daily Sales | Suggested Order | Category |\n"
+    header += "|---|---|---|---|---|---|---|\n"
+    rows = []
+    for _, r in df.iterrows():
+        rows.append(
+            f"| {r['generic_name']} | {r['brand_name']} | **{r['quantity_in_stock']}** | "
+            f"{r['reorder_level']} | {r['avg_daily_sales']} units/day | "
+            f"**{max(int(r['suggested_order']),1)}** units | {r['category']} |"
+        )
+    return header + "\n".join(rows) + "\n\n*Suggested order = 2x reorder level minus current stock*"
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEW FEATURE 3: REVENUE FORECAST
+# ═══════════════════════════════════════════════════════════════
+def format_revenue_forecast():
+    """Project revenue and stock depletion at current sales rate"""
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("""
+            SELECT i.generic_name, i.brand_name, i.quantity_in_stock,
+                   COALESCE(ROUND(SUM(t.quantity_sold)::numeric/30,2), 0) AS avg_daily,
+                   i.selling_price_usd
+            FROM inventory i
+            LEFT JOIN transactions t ON i.product_id = t.product_id
+            GROUP BY i.product_id, i.generic_name, i.brand_name,
+                     i.quantity_in_stock, i.selling_price_usd
+            ORDER BY (i.quantity_in_stock * i.selling_price_usd) DESC
+            LIMIT 10
+        """, conn)
+        df_daily = pd.read_sql_query("""
+            SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily_revenue
+            FROM (SELECT date, SUM(total_amount) AS daily_rev
+                  FROM transactions GROUP BY date) t
+        """, conn)
+    finally:
+        release_conn(conn)
+
+    avg_daily_rev = float(df_daily.iloc[0]['avg_daily_revenue'])
+    forecast_30 = round(avg_daily_rev * 30, 2)
+    forecast_90 = round(avg_daily_rev * 90, 2)
+
+    lines = ["## 📈 Revenue & Stock Forecast\n"]
+    lines.append(f"**Average Daily Revenue:** ${avg_daily_rev:,.2f}")
+    lines.append(f"**30-Day Revenue Forecast:** ${forecast_30:,.2f}")
+    lines.append(f"**90-Day Revenue Forecast:** ${forecast_90:,.2f}\n")
+    lines.append("**Days of Stock Remaining (Top 10 by value):**\n")
+    lines.append("| Drug | Brand | Stock | Avg Daily Sales | Days Remaining |\n|---|---|---|---|---|")
+    for _, r in df.iterrows():
+        if r['avg_daily'] > 0:
+            days = round(r['quantity_in_stock'] / r['avg_daily'])
+            flag = "🔴" if days < 30 else ("🟡" if days < 60 else "🟢")
+            lines.append(f"| {r['generic_name']} | {r['brand_name']} | {r['quantity_in_stock']} | {r['avg_daily']}/day | {flag} **{days} days** |")
+        else:
+            lines.append(f"| {r['generic_name']} | {r['brand_name']} | {r['quantity_in_stock']} | No sales | ∞ |")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEW FEATURE 4: MULTI-DRUG INTERACTION CHECK
+# ═══════════════════════════════════════════════════════════════
+def format_multi_interaction(question):
+    """Check interactions between multiple drugs mentioned in one question"""
+    keywords = extract_keywords(question)
+    if len(keywords) < 2:
+        return None  # fall through to single drug interaction
+    cypher = """
+        MATCH (a:Drug)-[r:INTERACTS_WITH]->(b:Drug)
+        WHERE toLower(a.generic_name) IN $drugs OR toLower(b.generic_name) IN $drugs
+        RETURN a.generic_name AS drug_a, b.generic_name AS drug_b,
+               r.severity AS severity, r.description AS description,
+               r.recommendation AS recommendation
+        ORDER BY CASE r.severity WHEN 'Major' THEN 1
+                 WHEN 'Moderate' THEN 2 WHEN 'Minor' THEN 3 ELSE 4 END
+        LIMIT 10
+    """
+    drugs_lower = [k.lower() for k in keywords]
+    results = run_cypher(cypher, {"drugs": drugs_lower})
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEW FEATURE 5: CONTROLLED SUBSTANCE CHECK (built into drug info)
+# ═══════════════════════════════════════════════════════════════
+# This is handled in format_drug_summary and query_neo4j_drug_info
+# The drug_knowledge table has a 'controlled' field — already displayed
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEW FEATURE 6: SALES vs INVENTORY RECONCILIATION
+# ═══════════════════════════════════════════════════════════════
+def format_reconciliation(question):
+    """Compare sales vs stock movement to flag discrepancies"""
+    keywords = extract_keywords(question)
+    drug_filter = ""
+    params = []
+    if keywords:
+        drug_filter = "WHERE LOWER(i.generic_name) LIKE %s"
+        params = [f"%{keywords[0]}%"]
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(f"""
+            SELECT i.generic_name, i.brand_name,
+                   SUM(b.quantity_received) AS total_received,
+                   SUM(t.quantity_sold)     AS total_sold,
+                   i.quantity_in_stock      AS current_stock,
+                   (SUM(b.quantity_received) - SUM(t.quantity_sold) - i.quantity_in_stock)
+                       AS discrepancy
+            FROM inventory i
+            LEFT JOIN batches b      ON i.product_id = b.product_id
+            LEFT JOIN transactions t ON i.product_id = t.product_id
+            {drug_filter}
+            GROUP BY i.product_id, i.generic_name, i.brand_name, i.quantity_in_stock
+            HAVING ABS(SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0)
+                       - i.quantity_in_stock) > 5
+            ORDER BY ABS(SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0)
+                         - i.quantity_in_stock) DESC
+            LIMIT 10
+        """, conn, params=params if params else None)
+    finally:
+        release_conn(conn)
+    if df.empty:
+        return "✅ Stock reconciliation looks clean — no significant discrepancies found."
+    header = "## ⚠️ Stock Reconciliation — Discrepancies Found\n\n"
+    header += "| Drug | Brand | Received | Sold | Current Stock | Discrepancy |\n"
+    header += "|---|---|---|---|---|---|\n"
+    rows = []
+    for _, r in df.iterrows():
+        flag = "🔴" if abs(r['discrepancy']) > 20 else "🟡"
+        rows.append(
+            f"| {r['generic_name']} | {r['brand_name']} | {r['total_received']:.0f} | "
+            f"{r['total_sold']:.0f} | {r['current_stock']} | {flag} **{r['discrepancy']:.0f}** |"
+        )
+    return header + "\n".join(rows) + "\n\n*Discrepancy = Received − Sold − Current Stock. Non-zero may indicate theft, wastage or data entry errors.*"
 
 # ═══════════════════════════════════════════════════════════════
 # MAIN ROUTER — dispatches to operational or clinical mode
 # ═══════════════════════════════════════════════════════════════
 
-GREETING_RESPONSE = """👋 Hello! I am the **Netrisyl Pharmacy Assistant** for Sunrise Pharmacy.
+GREETING_RESPONSE = """👋 Good morning! I am the **Netrisyl Pharmacy Assistant** for Sunrise Pharmacy.
 
-I can help pharmacy staff with:
-- 📦 **Stock & Prices** — *"Do we have amoxicillin in stock?"*
-- ⚠️ **Drug Interactions** — *"What interacts with metformin?"* *(Clinical — verified data only)*
+**Type *Good morning* for your daily briefing** — low stock, urgent expiries, and yesterday's revenue in one message.
+
+I can help with:
+- 🌅 **Daily Briefing** — *"Good morning"*
+- 📋 **Reorder List** — *"What is the reorder list?"*
+- 📈 **Revenue Forecast** — *"Revenue forecast"*
+- 📦 **Stock & Prices** — *"Do we have amoxicillin?"*
+- ⚠️ **Drug Interactions** — *"What interacts with metformin?"*
 - 📅 **Expiry Alerts** — *"Which batches are expiring soon?"*
 - 🚚 **Suppliers** — *"Who supplies ciprofloxacin?"*
-- 💊 **Drug Information** — *"What is ibuprofen used for?"* *(Clinical — verified data only)*
+- 💊 **Drug Information** — *"What is ibuprofen used for?"*
 - 🔄 **Alternatives** — *"What is an alternative to amoxicillin?"*
-- 💰 **Sales Summary** — *"What are the top selling drugs?"*
-- 📊 **Category Browse** — *"List all antibiotics"*
+- 💰 **Sales Summary** — *"Top selling drugs"*
 - 🔴 **Low Stock Alerts** — *"Which drugs are running low?"*
-- 📈 **Inventory Stats** — *"How many drug categories do we have?"*
+- 🔍 **Stock Reconciliation** — *"Check stock discrepancies"*
 
-⚠️ **Important:** Clinical answers (interactions, dosages) are sourced strictly from our knowledge base and always include a pharmacist verification reminder.
+⚠️ Clinical answers always include a pharmacist verification reminder.
 
 How can I help you today?"""
 
@@ -1094,10 +1391,25 @@ def route_and_respond(question, intent, conversation_history=None):
         return format_supplier(question), "supplier knowledge graph", "operational"
     if intent == "alternative":
         return format_alternative(question), "inventory database", "operational"
+    if intent == "briefing":
+        return format_daily_briefing(), "inventory + batch + transaction records", "operational"
+    if intent == "reorder":
+        return format_reorder_list(), "inventory + transaction records", "operational"
+    if intent == "forecast":
+        return format_revenue_forecast(), "inventory + transaction records", "operational"
+    if intent == "reconciliation":
+        return format_reconciliation(question), "inventory + batch + transaction records", "operational"
 
     # ── CLINICAL MODE — GPT with strict grounding ─────────────
     if intent == "interaction":
-        data = query_neo4j_interaction(question)
+        # Check if multiple drugs mentioned — use multi-drug checker
+        keywords = extract_keywords(question)
+        if len(keywords) >= 2:
+            data = format_multi_interaction(question)
+            if data is None:
+                data = query_neo4j_interaction(question)
+        else:
+            data = query_neo4j_interaction(question)
         answer = generate_clinical_answer(
             question, intent, "drug interaction knowledge graph",
             data, conversation_history
@@ -1232,12 +1544,14 @@ FEATURED_DRUGS = [
 ]
 
 QUICK_QUESTIONS = [
-    "Do we have amoxicillin in stock?",
-    "What interacts with metformin?",
+    "Good morning",
+    "Which drugs are running low on stock?",
     "Which batches are expiring soon?",
-    "Who supplies ciprofloxacin?",
+    "What are the reorder list?",
     "What are the top selling drugs?",
-    "Which drugs are running low on stock?"
+    "Revenue forecast",
+    "Do we have amoxicillin in stock?",
+    "What interacts with metformin?"
 ]
 
 # ── Gradio UI ─────────────────────────────────────────────────
@@ -1300,11 +1614,18 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             # Drug chips removed
             with gr.Row():
                 msg    = gr.Textbox(
-                    placeholder="Ask by drug name e.g. 'Do we have Amoxicillin?' or 'What interacts with Metformin?'",
+                    placeholder="Ask e.g. 'Do we have Amoxicillin?' or 'Good morning' for daily briefing",
                     label="",
                     scale=5
                 )
                 submit = gr.Button("Ask", variant="primary", scale=1)
+            with gr.Row():
+                audio_input = gr.Audio(
+                    sources=["microphone"],
+                    type="filepath",
+                    label="🎤 Voice Input (click to record)",
+                    visible=True
+                )
             with gr.Row():
                 export_btn  = gr.Button("📥 Export Chat", variant="secondary", scale=1)
                 export_file = gr.File(label="Download", scale=2, visible=False)
@@ -1336,6 +1657,24 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         [msg, chatbot, search_history_state, history_dropdown, history_display])
     msg.submit(respond,
         [msg, chatbot, search_history_state],
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
+
+    def transcribe_audio(audio_path, chat_history, search_history):
+        if not audio_path:
+            return "", chat_history, search_history, gr.update(), gr.update()
+        try:
+            import openai as _oa
+            with open(audio_path, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1", file=f
+                )
+            transcribed = transcript.text
+            return respond(transcribed, chat_history, search_history)
+        except Exception as e:
+            return "", chat_history, search_history, gr.update(), gr.update()
+
+    audio_input.stop_recording(transcribe_audio,
+        [audio_input, chatbot, search_history_state],
         [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     history_dropdown.change(reask_from_history,
