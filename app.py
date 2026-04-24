@@ -1521,17 +1521,12 @@ def respond(message, chat_history, search_history):
     search_history = search_history[:15]
     history_md = "\n".join([f"- {h}" for h in search_history])
 
-    # Generate audio response
-    audio_file = text_to_speech(full_answer) if full_answer else None
-    audio_update = gr.update(value=audio_file, visible=True) if audio_file else gr.update(visible=False)
-
     return (
         "",
         chat_history,
         search_history,
         gr.update(choices=search_history, value=None),
-        gr.update(value=history_md),
-        audio_update
+        gr.update(value=history_md)
     )
 
 def drug_summary_respond(drug_name, chat_history, search_history):
@@ -1658,8 +1653,9 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
                     visible=True
                 )
             with gr.Row():
-                export_btn  = gr.Button("📥 Export Chat", variant="secondary", scale=1)
-                export_file = gr.File(label="Download", scale=2, visible=False)
+                export_btn   = gr.Button("📥 Export Chat", variant="secondary", scale=1)
+                read_btn     = gr.Button("🔊 Read Last Response", variant="secondary", scale=1)
+                export_file  = gr.File(label="Download", scale=2, visible=False)
             audio_output = gr.Audio(
                 label="🔊 Audio Response",
                 autoplay=True,
@@ -1691,10 +1687,10 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     submit.click(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_output])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
     msg.submit(respond,
         [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_output])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     def transcribe_audio(audio_path, chat_history, search_history):
         if not audio_path:
@@ -1712,16 +1708,16 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     audio_input.stop_recording(transcribe_audio,
         [audio_input, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_output])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     history_dropdown.change(reask_from_history,
         [history_dropdown, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_output])
+        [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
         btn.click(click_quick_question,
             [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
-            [msg, chatbot, search_history_state, history_dropdown, history_display, audio_output])
+            [msg, chatbot, search_history_state, history_dropdown, history_display])
 
     # Drug chips removed
 
@@ -1734,6 +1730,14 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         f = export_chat(chat_history)
         return gr.update(value=f, visible=True) if f else gr.update(visible=False)
 
+    def do_read_aloud(chat_history):
+        if not chat_history:
+            return gr.update(visible=False)
+        last_response = chat_history[-1]["content"] if chat_history else ""
+        audio_file = text_to_speech(last_response)
+        return gr.update(value=audio_file, visible=True) if audio_file else gr.update(visible=False)
+
     export_btn.click(do_export, [chatbot], [export_file])
+    read_btn.click(do_read_aloud, [chatbot], [audio_output])
 
 demo.launch()
