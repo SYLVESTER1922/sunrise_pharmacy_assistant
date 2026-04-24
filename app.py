@@ -307,6 +307,36 @@ def format_stock_price(question):
         release_conn(conn)
     if df.empty:
         return "❌ Drug not found in inventory. Please check the spelling or use the Drug Lookup."
+    # Cheapest / most expensive handler
+    if any(w in q for w in ["cheapest", "lowest price", "least expensive"]):
+        cat_match = None
+        for kw, cat in categories.items():
+            if kw in q:
+                cat_match = cat
+                break
+        sql_c = "SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory"
+        sql_c += (" WHERE category = %s" if cat_match else "")
+        sql_c += " ORDER BY selling_price_usd ASC LIMIT 5"
+        conn = get_conn()
+        try:
+            df_c = pd.read_sql_query(sql_c, conn, params=(cat_match,) if cat_match else None)
+        finally:
+            release_conn(conn)
+        label = f"cheapest {cat_match}" if cat_match else "cheapest drugs"
+        header = f"**Top 5 {label}:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
+        rows = [f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | {r['quantity_in_stock']} | {r['shelf_location']} |" for _, r in df_c.iterrows()]
+        return header + "\n".join(rows)
+
+    if any(w in q for w in ["most expensive", "highest price", "most costly"]):
+        conn = get_conn()
+        try:
+            df_e = pd.read_sql_query("SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory ORDER BY selling_price_usd DESC LIMIT 5", conn)
+        finally:
+            release_conn(conn)
+        header = "**Top 5 most expensive drugs:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
+        rows = [f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | {r['quantity_in_stock']} | {r['shelf_location']} |" for _, r in df_e.iterrows()]
+        return header + "\n".join(rows)
+
     lines = []
     for _, r in df.iterrows():
         stock_flag = "⚠️ LOW STOCK" if r['quantity_in_stock'] <= r['reorder_level'] else "✅ In Stock"
@@ -501,7 +531,7 @@ def format_expiry(question):
             flag = " 🚨 URGENT" if days <= 30 else (" ⚠️" if days <= 60 else "")
             rows.append(
                 f"| {r['generic_name']} | {r['brand_name']} | {r['batch_number']} | "
-                f"{r['expiry_date']} | **{days}**{flag} | {r['quantity_remaining']} |"
+                f"{str(r['expiry_date'])[:10]} | **{days}**{flag} | {r['quantity_remaining']} |"
             )
         return header + "\n".join(rows)
 
@@ -729,10 +759,102 @@ def format_sales(question):
 
 
 
-def format_supplier(question):
-    """Supplier lookup — operational data from Neo4j"""
+
+def format_alternative(question):
+    """Find drugs in same category as the named drug"""
     keywords = extract_keywords(question)
-    search_term = keywords[0] if keywords else get_search_term(question)
+    if not keywords:
+        return "❌ Please specify a drug name."
+    search_param = None
+    drug_name = None
+    category = None
+    for k in keywords:
+        conn = get_conn()
+        try:
+            result = pd.read_sql_query(
+                "SELECT generic_name, category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1",
+                conn, params=(f"%{k}%",)
+            )
+        finally:
+            release_conn(conn)
+        if not result.empty:
+            search_param = f"%{k}%"
+            drug_name = result.iloc[0]["generic_name"]
+            category = result.iloc[0]["category"]
+            break
+    if not search_param:
+        return "❌ Drug not found in inventory."
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("""
+            SELECT generic_name, brand_name, formulation, strength,
+                   quantity_in_stock, selling_price_usd, shelf_location
+            FROM inventory
+            WHERE category = (
+                SELECT category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1
+            )
+            AND LOWER(generic_name) NOT LIKE %s
+            AND quantity_in_stock > 0
+            ORDER BY generic_name
+        """, conn, params=(search_param, search_param))
+    finally:
+        release_conn(conn)
+    if df.empty:
+        return f"❌ No alternatives found for {drug_name} in category {category}."
+    header = f"**Alternatives to {drug_name}** (category: {category})\n\n"
+    header += "| Drug | Brand | Form | Strength | Stock | Price | Shelf |\n"
+    header += "|---|---|---|---|---|---|---|\n"
+    rows = [
+        f"| {r['generic_name']} | {r['brand_name']} | {r['formulation']} | "
+        f"{r['strength']} | {r['quantity_in_stock']} | ${r['selling_price_usd']} | {r['shelf_location']} |"
+        for _, r in df.iterrows()
+    ]
+    return header + "\n".join(rows) + "\n\n⚠️ **Clinical Note:** Therapeutic substitution requires pharmacist approval."
+
+def format_supplier(question):
+    """Supplier lookup — handles drug lookup, lead time queries, and city queries"""
+    q = question.lower()
+
+    # Shortest lead time query
+    if any(w in q for w in ["shortest", "fastest", "quickest", "best lead", "minimum lead"]):
+        cypher = """
+            MATCH (s:Supplier)
+            RETURN s.name AS supplier, s.lead_time AS lead_time_days,
+                   s.city AS city, s.contact AS contact
+            ORDER BY s.lead_time ASC LIMIT 3
+        """
+        with driver.session() as session:
+            results = [dict(r) for r in session.run(cypher)]
+        if not results:
+            return "❌ No supplier information found."
+        header = "**Suppliers with shortest lead times:**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
+        rows = [f"| {r['supplier']} | {r['lead_time_days']} days | {r['city']} | {r['contact']} |" for r in results]
+        return header + "\n".join(rows)
+
+    # City/count query
+    if any(w in q for w in ["harare", "bulawayo", "mutare", "how many suppliers", "suppliers in", "city"]):
+        cypher = """
+            MATCH (s:Supplier)
+            RETURN s.city AS city, count(s) AS supplier_count,
+                   collect(s.name) AS suppliers
+            ORDER BY supplier_count DESC
+        """
+        with driver.session() as session:
+            results = [dict(r) for r in session.run(cypher)]
+        if not results:
+            return "❌ No supplier information found."
+        header = "**Suppliers by City:**\n\n| City | Count | Suppliers |\n|---|---|---|\n"
+        rows = [f"| {r['city']} | {r['supplier_count']} | {', '.join(r['suppliers'])} |" for r in results]
+        return header + "\n".join(rows)
+
+    # Drug supplier lookup — strip non-drug words before searching
+    supplier_stopwords = {"order", "supplier", "supply", "supplies", "distributor",
+                          "source", "procure", "purchase", "buy", "vendor", "where", "who"}
+    keywords = extract_keywords(question)
+    drug_keywords = [k for k in keywords if k not in supplier_stopwords]
+    search_term = drug_keywords[0] if drug_keywords else (keywords[0] if keywords else "")
+    if not search_term:
+        return "❌ Please specify a drug name."
     cypher = """
         MATCH (d:Drug)-[:SUPPLIED_BY]->(s:Supplier)
         WHERE toLower(d.generic_name) CONTAINS toLower($search)
@@ -746,23 +868,6 @@ def format_supplier(question):
         results = [dict(r) for r in session.run(cypher, search=search_term)]
     if not results:
         return "❌ No supplier information found for that drug."
-    lines = [f"**Supplier information for {results[0]['drug']}:**\n"]
-    seen = set()
-    for r in results:
-        if r['supplier'] in seen:
-            continue
-        seen.add(r['supplier'])
-        lines.append(f"""| Field | Value |
-|---|---|
-| Supplier | **{r['supplier']}** |
-| Contact | {r['contact']} |
-| Phone | {r['phone']} |
-| City | {r['city']} |
-| Lead Time | {r['lead_time_days']} days |
-| Payment Terms | {r['payment_terms']} |
-""")
-    return "\n".join(lines)
-
 def format_drug_summary(drug_name):
     sql = """
         SELECT i.generic_name, i.brand_name, i.formulation, i.strength,
