@@ -1,3 +1,33 @@
+"""
+Netrisyl Pharmacy Assistant — Single-File Demo App
+=================================================
+
+Purpose
+-------
+A Gradio-based pharmacy operations and clinical assistant for Sunrise Pharmacy.
+
+Design Principles
+-----------------
+1. Operational answers are deterministic: PostgreSQL/Supabase queries return stock,
+   price, sales, expiry, reorder, forecast, and reconciliation results.
+2. Graph-backed answers use Neo4j for suppliers, drug knowledge, and interactions.
+3. LLM use is controlled: GPT is used for intent/tool selection and for clinical
+   summaries grounded only in retrieved knowledge-graph data.
+4. This file is intentionally kept as one deployable app.py for Hugging Face demos.
+
+Deployment Notes
+----------------
+Set these environment variables in Hugging Face Spaces secrets:
+- SUPABASE_URL
+- NEO4J_URI
+- NEO4J_USERNAME
+- NEO4J_PASSWORD
+- OPENAI_API_KEY
+"""
+
+# ═══════════════════════════════════════════════════════════════
+# 1. IMPORTS
+# ═══════════════════════════════════════════════════════════════
 import os
 import re
 import psycopg2
@@ -10,7 +40,10 @@ from difflib import SequenceMatcher
 from datetime import datetime, date
 import json
 
-# ── Credentials ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# 2. ENVIRONMENT CONFIGURATION + CLIENT SETUP
+# ═══════════════════════════════════════════════════════════════
+# Credentials are read from Hugging Face / local environment variables.
 NEO4J_URI      = os.environ.get("NEO4J_URI")
 NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
@@ -35,7 +68,9 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 driver = get_driver()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ── Supabase PostgreSQL connection ───────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# 3. POSTGRESQL / SUPABASE CONNECTION POOL
+# ═══════════════════════════════════════════════════════════════
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 
 # Connection pool — thread safe, reuses connections efficiently
@@ -60,7 +95,10 @@ def release_conn(conn):
 
 print("Supabase connection pool ready ✓")
 
-# ── Load drug list ────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# 4. STARTUP DATA LOAD
+# ═══════════════════════════════════════════════════════════════
+# Drug names are cached for fast fuzzy matching and quick lookup dropdowns.
 def get_all_drugs():
     conn = get_conn()
     try:
@@ -75,7 +113,9 @@ def get_all_drugs():
 DRUGS_DF   = get_all_drugs()
 DRUG_NAMES = DRUGS_DF["generic_name"].tolist()
 
-# ── Fuzzy drug name matching ──────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# 5. FUZZY DRUG NAME MATCHING
+# ═══════════════════════════════════════════════════════════════
 def fuzzy_match_drug(text, threshold=78):
     text = re.sub(r"['\u2019\u2018`]", "", text.lower().strip())
     best_score = 0
@@ -115,7 +155,9 @@ def fuzzy_correct_question(question):
     note = f"*(Auto-corrected: {', '.join(corrections)})*" if corrections else ""
     return corrected, note
 
-# ── Intent classification ─────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# 6. SYSTEM INTENTS + GPT TOOL-CALLING SETUP
+# ═══════════════════════════════════════════════════════════════
 GREETINGS = {
     "hi", "hey", "hello", "good morning", "good afternoon",
     "good evening", "help", "what can you do", "how are you",
@@ -129,7 +171,7 @@ FAREWELLS = {"bye", "goodbye", "see you", "later", "exit", "quit"}
 # GPT decides intent AND parameters → Python executes SQL → zero hallucination
 # ═══════════════════════════════════════════════════════════════
 
-# ── Keyword extractor ─────────────────────────────────────────
+# ── Keyword extraction helpers ────────────────────────────────
 SKIP_WORDS = {
     "what", "which", "who", "where", "when", "how", "why", "is", "are",
     "was", "were", "do", "does", "did", "have", "has", "had", "will",
@@ -397,9 +439,9 @@ def _keyword_fallback_tool(q: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-# SQL EXECUTORS — each tool maps to a SQL executor
-# GPT provides parameters, Python builds and runs safe SQL
+# 7. GPT TOOL EXECUTORS
 # ═══════════════════════════════════════════════════════════════
+# GPT selects the tool and parameters; Python executes SQL/Cypher and formats real data.
 
 def execute_query_inventory(params: dict) -> str:
     """Execute inventory query with GPT-provided parameters."""
@@ -746,6 +788,11 @@ def execute_query_supplier(params: dict) -> str:
 
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# 8. DIRECT OPERATIONAL FORMATTERS — INVENTORY, SALES, EXPIRY,
+#    SUPPLIERS, ALTERNATIVES, AND DRUG SUMMARY
+# ═══════════════════════════════════════════════════════════════
 def format_stock_price(question):
     q = question.lower()
     categories = {
@@ -1445,7 +1492,7 @@ def format_drug_summary(drug_name):
 {expiry_line}"""
 
 # ═══════════════════════════════════════════════════════════════
-# CLINICAL MODE — GPT with strict grounding + disclaimer
+# 9. CLINICAL MODE — GRAPH-RETRIEVED DATA + STRICT GPT GROUNDING
 # ═══════════════════════════════════════════════════════════════
 
 CLINICAL_DISCLAIMER = (
@@ -1543,6 +1590,10 @@ def query_neo4j_drug_info(question):
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 1: DAILY BRIEFING
 # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# 10. DAILY BRIEFING FEATURE
+# ═══════════════════════════════════════════════════════════════
 def format_daily_briefing():
     """Morning briefing — low stock + urgent expiry + yesterday revenue"""
     from datetime import date as date_obj
@@ -1630,6 +1681,10 @@ def format_daily_briefing():
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 2: REORDER ACTION LIST
 # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# 11. PROCUREMENT / REORDER ACTION LIST
+# ═══════════════════════════════════════════════════════════════
 def format_reorder_list():
     """Complete procurement action list with suggested order quantities"""
     conn = get_conn()
@@ -1670,6 +1725,10 @@ def format_reorder_list():
 
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 3: REVENUE FORECAST
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# 12. REVENUE + STOCK DEPLETION FORECAST
 # ═══════════════════════════════════════════════════════════════
 def format_revenue_forecast():
     """Project revenue and stock depletion at current sales rate"""
@@ -1747,6 +1806,10 @@ def format_multi_interaction(question):
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 6: SALES vs INVENTORY RECONCILIATION
 # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# 13. SALES VS INVENTORY RECONCILIATION
+# ═══════════════════════════════════════════════════════════════
 def format_reconciliation(question):
     """Compare sales vs stock movement to flag discrepancies"""
     keywords = extract_keywords(question)
@@ -1792,7 +1855,7 @@ def format_reconciliation(question):
     return header + "\n".join(rows) + "\n\n*Discrepancy = Received − Sold − Current Stock. Non-zero may indicate theft, wastage or data entry errors.*"
 
 # ═══════════════════════════════════════════════════════════════
-# MAIN ROUTER — dispatches to operational or clinical mode
+# 14. MAIN ROUTER — DISPATCHES TO OPERATIONAL OR CLINICAL MODE
 # ═══════════════════════════════════════════════════════════════
 
 def get_greeting():
@@ -1836,6 +1899,12 @@ THANKS_RESPONSE   = "You're welcome! Feel free to ask anytime. 😊"
 FAREWELL_RESPONSE = "Goodbye! Come back anytime you need help. 👋"
 
 
+
+
+# Router design note:
+# - System intents return static assistant messages.
+# - Operational requests return deterministic database results.
+# - Clinical requests retrieve graph data first, then summarize with strict grounding.
 
 def route_and_respond(question, conversation_history=None):
     """
@@ -2037,7 +2106,9 @@ def reask_from_history(selected_question, chat_history, search_history):
         return "", chat_history, search_history, gr.update(), gr.update(), ""
     return respond(selected_question, chat_history, search_history)
 
-# ── Featured drugs & quick questions ─────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# 16. DEMO CONTENT — FEATURED DRUGS + QUICK QUESTIONS
+# ═══════════════════════════════════════════════════════════════
 FEATURED_DRUGS = [
     "Amoxicillin", "Paracetamol", "Metformin", "Ibuprofen",
     "Ciprofloxacin", "Azithromycin", "Amlodipine", "Losartan",
@@ -2055,7 +2126,9 @@ QUICK_QUESTIONS = [
     "What interacts with metformin?"
 ]
 
-# ── Gradio UI ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# 17. GRADIO USER INTERFACE
+# ═══════════════════════════════════════════════════════════════
 with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     gr.HTML("""
