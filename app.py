@@ -231,7 +231,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "query_briefing",
-            "description": "Generate daily morning briefing — low stock + urgent expiry + yesterday revenue",
+            "description": "Generate a daily briefing summary — low stock + urgent expiry + yesterday revenue. Triggered by: daily briefing, morning briefing, daily summary, start of day report.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -1744,27 +1744,30 @@ def get_greeting():
         tod = "Good evening"
     return tod
 
-GREETING_RESPONSE = f"""👋 {get_greeting()}! I am the **Netrisyl Pharmacy Assistant** for Sunrise Pharmacy.
+def get_greeting_response(question=""):
+    """Generate a natural, time-aware greeting response."""
+    from datetime import datetime as _dt
+    hour = _dt.now().hour
+    if hour < 12:
+        tod, emoji = "Good morning", "🌅"
+    elif hour < 17:
+        tod, emoji = "Good afternoon", "☀️"
+    else:
+        tod, emoji = "Good evening", "🌙"
+    return (
+        f"{emoji} {tod}! Welcome to the Sunrise Pharmacy Assistant.\n\n"
+        "Just ask me anything about the pharmacy — I understand natural language. For example:\n\n"
+        "- *\"Do we have amoxicillin in stock?\"*\n"
+        "- *\"Which drugs need reordering?\"*\n"
+        "- *\"What interacts with metformin?\"*\n"
+        "- *\"Who supplies ciprofloxacin?\"*\n"
+        "- *\"What are our top selling drugs?\"*\n"
+        "- *\"Which batches are expiring soon?\"*\n\n"
+        "💡 **Tip:** Ask for a **\"daily briefing\"** to get low stock, urgent expiries "
+        "and yesterday\'s revenue all in one message."
+    )
 
-**Type *Good morning* for your daily briefing** — low stock, urgent expiries, and yesterday's revenue in one message.
-
-I can help with:
-- 🌅 **Daily Briefing** — *"Good morning"*
-- 📋 **Reorder List** — *"What is the reorder list?"*
-- 📈 **Revenue Forecast** — *"Revenue forecast"*
-- 📦 **Stock & Prices** — *"Do we have amoxicillin?"*
-- ⚠️ **Drug Interactions** — *"What interacts with metformin?"*
-- 📅 **Expiry Alerts** — *"Which batches are expiring soon?"*
-- 🚚 **Suppliers** — *"Who supplies ciprofloxacin?"*
-- 💊 **Drug Information** — *"What is ibuprofen used for?"*
-- 🔄 **Alternatives** — *"What is an alternative to amoxicillin?"*
-- 💰 **Sales Summary** — *"Top selling drugs"*
-- 🔴 **Low Stock Alerts** — *"Which drugs are running low?"*
-- 🔍 **Stock Reconciliation** — *"Check stock discrepancies"*
-
-⚠️ Clinical answers always include a pharmacist verification reminder.
-
-How can I help you today?"""
+GREETING_RESPONSE = get_greeting_response()
 
 THANKS_RESPONSE   = "You're welcome! Feel free to ask anytime. 😊"
 FAREWELL_RESPONSE = "Goodbye! Come back anytime you need help. 👋"
@@ -1791,7 +1794,7 @@ def route_and_respond(question, conversation_history=None):
 
     # ── System responses ───────────────────────────────────────
     if tool == "greeting":
-        return GREETING_RESPONSE, "", "system"
+        return get_greeting_response(question), "", "system"
     if tool == "thanks":
         return THANKS_RESPONSE, "", "system"
     if tool == "farewell":
@@ -1904,24 +1907,16 @@ def respond(message, chat_history, search_history):
     ]
 
     try:
-        corrected_message, correction_note = fuzzy_correct_question(message)
-        intent = classify_intent(corrected_message, conversation_history)
-        answer, source, mode = route_and_respond(
-            corrected_message, intent, conversation_history
-        )
+        answer, source, mode = route_and_respond(message, conversation_history)
 
         if mode == "system":
             full_answer = answer
-        elif intent == "followup":
-            full_answer = answer
         elif mode == "operational":
-            header = f"*📦 Operational data — {source}*\n\n"
-            body = answer
-            full_answer = f"{correction_note}\n\n{header}{body}" if correction_note else f"{header}{body}"
+            header = f"*📦 Operational data — {source}*\n\n" if source else ""
+            full_answer = f"{header}{answer}"
         else:  # clinical
-            header = f"*🧪 Clinical data — {source}*\n\n"
-            body = answer
-            full_answer = f"{correction_note}\n\n{header}{body}" if correction_note else f"{header}{body}"
+            header = f"*🧪 Clinical data — {source}*\n\n" if source else ""
+            full_answer = f"{header}{answer}"
 
     except Exception as e:
         full_answer = f"An error occurred: {str(e)}\nPlease try rephrasing your question."
