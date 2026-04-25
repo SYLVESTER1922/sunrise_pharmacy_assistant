@@ -209,6 +209,37 @@ Intent:"""
             return "supplier"
         return "drug_info"
 
+# ── Keyword extractor ─────────────────────────────────────────
+SKIP_WORDS = {
+    "what", "which", "who", "where", "when", "how", "why", "is", "are",
+    "was", "were", "do", "does", "did", "have", "has", "had", "will",
+    "can", "could", "should", "would", "the", "a", "an", "in", "on",
+    "at", "for", "of", "to", "and", "or", "but", "with", "from",
+    "about", "we", "our", "us", "i", "my", "me", "stock", "drug",
+    "drugs", "medicine", "medicines", "pharmacy", "pharmacist",
+    "please", "tell", "show", "give", "find", "get", "check",
+    "supplier", "supply", "supplies", "order", "source",
+    "batch", "expiry", "soon", "selling", "sales", "name",
+    "information", "info", "details", "need", "want",
+    "medication", "medications", "tablet", "capsule", "injection",
+    "anything", "something", "everything"
+}
+
+def extract_keywords(question):
+    """Extract likely drug names and key terms from a question"""
+    import re
+    words = re.sub(r"['\u2019?!,.]", "", question.lower()).split()
+    keywords = []
+    for w in words:
+        if len(w) >= 4 and w not in SKIP_WORDS and not w.isdigit():
+            keywords.append(w)
+    return keywords
+
+def get_search_term(question):
+    """Get primary search term from question"""
+    keywords = extract_keywords(question)
+    return keywords[0] if keywords else question.lower()
+
 def format_stock_price(question):
     q = question.lower()
     categories = {
