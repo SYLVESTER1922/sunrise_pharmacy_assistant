@@ -970,7 +970,6 @@ ABSOLUTE RULES — violating these is not permitted under any circumstances:
 5. Keep the answer to 3-5 sentences. Be precise and factual.
 6. For interactions, always state the exact severity level from the data (Minor/Moderate/Major).
 7. End every answer with the actual source name, for example: "Source: drug knowledge graph" or "Source: drug interaction knowledge graph".
-8. Response to any form of greeting in a natural and precise way and offer to assist with assistance to questions relating to the knowledge graph except for Good morning.
 """
 
 def generate_clinical_answer(question, intent, source, data, conversation_history=None):
@@ -1563,7 +1562,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
              onerror="this.style.display='none'"/>
         <div style="text-align: center; flex: 1;">
             <h1 style="color: white; margin: 0; font-size: 24px;">
-                💊 Pharmacy Assistant
+                💊 💊💊💊Pharmacy Assistant
             </h1>
             <p style="color: #aed6f1; margin: 4px 0 0 0; font-size: 13px;">
                 Powered by Neo4j Knowledge Graph + GPT-4o-mini | Harare, Zimbabwe
