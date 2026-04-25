@@ -129,19 +129,44 @@ FAREWELLS = {"bye", "goodbye", "see you", "later", "exit", "quit"}
 # GPT decides intent AND parameters → Python executes SQL → zero hallucination
 # ═══════════════════════════════════════════════════════════════
 
+# ── Keyword extractor ─────────────────────────────────────────
+SKIP_WORDS = {
+    "what", "which", "who", "where", "when", "how", "why", "is", "are",
+    "was", "were", "do", "does", "did", "have", "has", "had", "will",
+    "can", "could", "should", "would", "the", "a", "an", "in", "on",
+    "at", "for", "of", "to", "and", "or", "but", "with", "from",
+    "about", "we", "our", "us", "i", "my", "me", "stock", "drug",
+    "drugs", "medicine", "medicines", "pharmacy", "pharmacist",
+    "please", "tell", "show", "give", "find", "get", "check",
+    "supplier", "supply", "supplies", "order", "source",
+    "batch", "expiry", "soon", "selling", "sales", "name",
+    "information", "info", "details", "need", "want",
+    "medication", "medications", "tablet", "capsule", "injection",
+    "anything", "something", "everything"
+}
+
+def extract_keywords(question: str) -> list:
+    """Extract likely drug names and key terms from a question."""
+    words = re.sub(r"[\'\u2019?!,.]", "", question.lower()).split()
+    return [w for w in words if len(w) >= 4 and w not in SKIP_WORDS and not w.isdigit()]
+
+def get_search_term(question: str) -> str:
+    keywords = extract_keywords(question)
+    return keywords[0] if keywords else question.lower()
+
 TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
             "name": "query_inventory",
-            "description": "Query drug inventory — stock levels, prices, categories, low stock alerts",
+            "description": "Query drug inventory — stock levels, prices, categories, low stock alerts. Do NOT use for batch or expiry questions — use query_expiry for those.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "drug_name":   {"type": "string",  "description": "Specific drug name to look up, or null for all"},
                     "category":    {"type": "string",  "description": "Drug category e.g. Antibiotics, Analgesics, or null"},
-                    "filter":      {"type": "string",  "enum": ["below_reorder", "above_reorder", "all", "cheapest", "most_expensive"], "description": "Stock filter"},
-                    "sort_by":     {"type": "string",  "enum": ["stock_pct", "price_asc", "price_desc", "name"], "description": "Sort order"},
+                    "filter":      {"type": "string",  "enum": ["below_reorder", "above_reorder", "all", "cheapest", "most_expensive"], "description": "Stock filter. Use below_reorder for: 'running low', 'need restocking', 'critical stock', 'which drugs are low', 'drugs below reorder'"},
+                    "sort_by":     {"type": "string",  "enum": ["stock_pct", "price_asc", "price_desc", "name", "margin_desc", "margin_asc"], "description": "Sort order. Use margin_desc for highest margin drugs"},
                     "limit":       {"type": "integer", "description": "Number of results, default 10"}
                 },
                 "required": ["filter"]
@@ -170,7 +195,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "query_expiry",
-            "description": "Query batch expiry records — upcoming expiries, specific drug batches",
+            "description": "Query batch expiry records — upcoming expiries, specific drug batches, batch count for a drug. Use for: 'how many batches of X', 'when does X expire', 'batches expiring soon', 'X batch count'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -239,7 +264,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "query_reorder",
-            "description": "Generate procurement action list — drugs to reorder with suggested quantities",
+            "description": "Generate a procurement action list with suggested order quantities. Only use when user explicitly asks for order quantities, suggested amounts, or procurement plan. NOT for simply listing low stock drugs.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -390,6 +415,8 @@ def execute_query_inventory(params: dict) -> str:
         "price_asc":     "selling_price_usd ASC",
         "price_desc":    "selling_price_usd DESC",
         "name":          "generic_name ASC",
+        "margin_desc":   "margin DESC",
+        "margin_asc":    "margin ASC",
     }
     order = sort_map.get(sort_by, "generic_name ASC")
 
@@ -433,7 +460,8 @@ def execute_query_inventory(params: dict) -> str:
         SELECT generic_name, brand_name, formulation, strength,
                quantity_in_stock, reorder_level, selling_price_usd,
                cost_price_usd, shelf_location, category,
-               ROUND((quantity_in_stock::numeric/NULLIF(reorder_level,0))*100,0) AS stock_pct
+               ROUND((quantity_in_stock::numeric/NULLIF(reorder_level,0))*100,0) AS stock_pct,
+               ROUND(((selling_price_usd - cost_price_usd)/NULLIF(selling_price_usd,0))*100,1) AS margin
         FROM inventory
         {where}
         ORDER BY {order}
@@ -498,6 +526,36 @@ def execute_query_inventory(params: dict) -> str:
     return header + "\n".join(rows)
 
 
+def _day_drug_breakdown(day_name: str) -> str:
+    """Show top selling drugs on a specific day of week."""
+    day_map = {"monday":1,"tuesday":2,"wednesday":3,"thursday":4,
+               "friday":5,"saturday":6,"sunday":0}
+    day_num = day_map.get(day_name.lower(), 6)
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("""
+            SELECT i.brand_name, i.generic_name,
+                   SUM(t.quantity_sold) AS total_units,
+                   ROUND(SUM(t.total_amount)::numeric,2) AS total_revenue
+            FROM transactions t
+            JOIN inventory i ON t.product_id = i.product_id
+            WHERE EXTRACT(DOW FROM t.date::date) = %s
+            GROUP BY i.brand_name, i.generic_name
+            ORDER BY total_units DESC LIMIT 10
+        """, conn, params=(day_num,))
+    finally:
+        release_conn(conn)
+    if df.empty:
+        return f"No sales data found for {day_name.capitalize()}s."
+    header = f"**Top selling drugs on {day_name.capitalize()}s:**\n\n"
+    header += "| Rank | Brand | Generic | Units | Revenue |\n|---|---|---|---|---|\n"
+    rows = [
+        f"| {i+1} | {r['brand_name']} | {r['generic_name']} | {r['total_units']} | ${r['total_revenue']:,.2f} |"
+        for i, (_, r) in enumerate(df.iterrows())
+    ]
+    return header + "\n".join(rows)
+
+
 def execute_query_sales(params: dict) -> str:
     """Execute sales query with GPT-provided parameters."""
     period    = params.get("period", "all_time")
@@ -516,6 +574,9 @@ def execute_query_sales(params: dict) -> str:
         return format_sales("last week")
 
     if period == "day_of_week" and day_name:
+        # If asking "what sold most" on a day → drug breakdown
+        if direction == "top" or any(w in str(params) for w in ["most", "best", "top"]):
+            return _day_drug_breakdown(day_name)
         return format_sales(day_name.lower())
 
     # Top/bottom sellers
@@ -1530,8 +1591,9 @@ def format_daily_briefing():
     finally:
         release_conn(conn)
 
-    from datetime import datetime as _dt
-    hour = _dt.now().hour
+    from datetime import datetime as _dt, timezone, timedelta
+    cat_tz = timezone(timedelta(hours=2))
+    hour = _dt.now(tz=cat_tz).hour
     tod = "Good Morning" if hour < 12 else ("Good Afternoon" if hour < 17 else "Good Evening")
     lines = [f"# 🌅 {tod}! Daily Briefing — {today}\n"]
 
@@ -1746,8 +1808,9 @@ def get_greeting():
 
 def get_greeting_response(question=""):
     """Generate a natural, time-aware greeting response."""
-    from datetime import datetime as _dt
-    hour = _dt.now().hour
+    from datetime import datetime as _dt, timezone, timedelta
+    cat_tz = timezone(timedelta(hours=2))  # CAT — Central Africa Time (UTC+2)
+    hour = _dt.now(tz=cat_tz).hour
     if hour < 12:
         tod, emoji = "Good morning", "🌅"
     elif hour < 17:
