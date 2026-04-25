@@ -125,217 +125,89 @@ THANKS    = {"thank you", "thanks", "thank", "cheers", "appreciated"}
 FAREWELLS = {"bye", "goodbye", "see you", "later", "exit", "quit"}
 
 def classify_intent(question, conversation_history=None):
+    """Use GPT to classify intent — handles any natural language phrasing"""
     q = question.lower().strip()
-    q_clean = re.sub(r"['\u2019?!,.]", "", q)
 
-    # ── System intents ────────────────────────────────────────
-    if any(q_clean == g or q_clean.startswith(g) for g in GREETINGS):
+    # Fast path — greetings handled without GPT call
+    GREETINGS = {"hi","hello","hey","good morning","morning","good afternoon",
+                 "good evening","howzit","how are you","whats up","what's up"}
+    THANKS = {"thanks","thank you","thank","cheers","appreciated","great","ok","okay","cool","perfect","noted"}
+    FAREWELLS = {"bye","goodbye","see you","see ya","later","ciao","take care"}
+
+    q_clean = q.strip("?!.,'’ ")
+    if q_clean in GREETINGS or any(q_clean.startswith(g) for g in GREETINGS):
         return "greeting"
-    if any(g in q_clean for g in THANKS):
+    if q_clean in THANKS:
         return "thanks"
-    if any(g in q_clean for g in FAREWELLS):
+    if q_clean in FAREWELLS:
         return "farewell"
+    if q.startswith("quick summary:"):
+        return "drug_summary"
 
-    # ── SALES explicit — before followup and stock_price ─────
-    if any(w in q for w in [
-        "top selling", "least selling", "best selling", "worst selling",
-        "bottom selling", "slow moving", "top drugs", "least drugs",
-        "last day", "yesterday", "latest day", "most recent day",
-        "last transaction", "recent sales",
-        "monday", "tuesday", "wednesday", "thursday",
-        "friday", "saturday", "sunday",
-        "last week", "this week", "past week",
-        "best performing category", "top category",
-        "by units sold", "by revenue", "by transactions",
-        "bottom 5", "bottom 3", "bottom 10", "top 5", "top 3", "top 10",
-        "most sold", "least sold", "best performer", "worst performer"
-    ]):
-        return "sales"
+    # GPT intent classification
+    intent_list = """
+- stock_price: checking if a drug is available, stock levels, price, cost, shelf location
+- expiry: batch expiry dates, days until expiry, which batches expire soon, urgent batches
+- low_stock: drugs below or near reorder level, running low, need reordering, stock alerts
+- sales: top/bottom selling drugs, revenue, sales by day/week, customer type breakdown, transactions
+- supplier: who supplies a drug, order from, lead times, suppliers by city, procurement
+- stats: inventory summary, how many categories, total products, inventory overview
+- category_browse: list all drugs in a category e.g. all antibiotics, all antiretrovirals
+- interaction: drug interactions, safe to combine, avoid with, contraindications between drugs
+- drug_info: drug usage, dosage, side effects, indications, drug class, clinical information
+- alternative: alternatives or substitutes for a drug, same category replacements
+- briefing: daily morning briefing, daily summary, start of day summary
+- reorder: procurement action list, what to order, reorder report
+- forecast: revenue forecast, stock forecast, days of stock remaining, projections
+- reconciliation: stock discrepancies, missing stock, stock audit, losses
+- followup: follow-up on previous answer, more details, elaborate on last response
+"""
 
-    # ── SUPPLIER explicit — before stock_price ────────────────
-    if any(w in q for w in [
-        "supplier", "order from", "who supply", "distributor",
-        "vendor", "supplies", "supply", "who provides",
-        "where do we order", "procurement", "purchase from",
-        "buy from", "shortest lead", "fastest lead",
-        "how many suppliers", "suppliers in", "lead time",
-        "which supplier"
-    ]):
-        return "supplier"
+    # Include last intent for followup detection
+    last_intent = ""
+    if conversation_history:
+        last_intent = f"\nThe previous question's intent was: {conversation_history[-1].get('intent','unknown')}"
 
-    # ── BRIEFING — daily morning summary ─────────────────────
-    if any(w in q for w in [
-        "good morning", "morning briefing", "daily briefing",
-        "daily summary", "morning summary", "start of day",
-        "what do i need to know", "briefing"
-    ]):
-        return "briefing"
+    prompt = f"""You are a pharmacy chatbot intent classifier. Given a question, return ONLY the intent name from this list:{intent_list}
 
-    # ── REORDER LIST ───────────────────────────────────────────
-    if any(w in q for w in [
-        "reorder list", "procurement list", "what to order",
-        "what do we need to order", "order list", "action list",
-        "what needs reordering", "reorder report"
-    ]):
-        return "reorder"
+Rules:
+- Return ONLY the intent name, nothing else
+- If the question asks about specific drug stock/price/availability → stock_price
+- If the question asks about running low, below reorder, need to restock → low_stock
+- If the question references "it", "them", "those", "the same" AND there is conversation history → followup
+- Default to drug_info if unsure{last_intent}
 
-    # ── FORECAST ──────────────────────────────────────────────
-    if any(w in q for w in [
-        "forecast", "projection", "predict", "how long will stock last",
-        "days of stock", "revenue forecast", "stock forecast",
-        "how long until", "when will we run out"
-    ]):
-        return "forecast"
+Question: {question}
+Intent:"""
 
-    # ── RECONCILIATION ────────────────────────────────────────
-    if any(w in q for w in [
-        "reconciliation", "reconcile", "discrepancy", "stock discrepancy",
-        "missing stock", "stock variance", "stock loss", "shrinkage",
-        "stock check", "audit", "check discrepancies", "stock audit",
-        "investigate stock", "stock investigation", "losses"
-    ]):
-        return "reconciliation"
-
-    # ── STATS explicit — before stock_price ──────────────────
-    if any(w in q for w in [
-        "how many drugs", "how many types", "how many medicines",
-        "how many categories", "how many drug", "drug categories",
-        "total drugs", "drug types", "categories we have",
-        "how many do we have", "inventory summary", "stock summary",
-        "inventory overview", "stock overview",
-        "how many drug categories", "how many do we stock",
-        "categories do we stock", "categories do we have"
-    ]):
-        return "stats"
-
-    # ── CHEAPEST/EXPENSIVE — before drug_info ───────────────
-    if any(w in q for w in [
-        "cheapest", "most expensive", "lowest price", "highest price",
-        "least expensive", "most costly"
-    ]):
-        return "stock_price"
-
-    # ── ALTERNATIVES explicit — before drug_info ─────────────
-    if any(w in q for w in [
-        "alternative", "substitute", "instead of", "replace",
-        "similar to", "other option", "other drug", "swap",
-        "equivalent", "whats another", "what else can",
-        "what can replace", "what can i use instead"
-    ]):
-        return "alternative"
-
-    # ── INTERACTION explicit — before followup ────────────────
-    if any(w in q for w in [
-        "interact", "interaction", "safe with", "combine", "mix",
-        "take with", "used with", "combined with",
-        "contraindic", "avoid with"
-    ]):
-        return "interaction"
-
-    # ── DRUG INFO explicit — before followup ──────────────────
-    if any(w in q for w in [
-        "dose", "dosage", "used for", "indication", "side effect",
-        "contraindication", "what is", "tell me about", "drug class",
-        "prescribed for", "treats", "what does", "what can"
-    ]):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=10
+        )
+        intent = response.choices[0].message.content.strip().lower()
+        # Validate it's a known intent
+        valid_intents = {
+            "stock_price","expiry","low_stock","sales","supplier","stats",
+            "category_browse","interaction","drug_info","alternative",
+            "briefing","reorder","forecast","reconciliation","followup","drug_summary"
+        }
+        return intent if intent in valid_intents else "drug_info"
+    except Exception:
+        # Fallback to keyword matching if GPT fails
+        if any(w in q for w in ["low","running","reorder","below","critical","out of"]):
+            return "low_stock"
+        if any(w in q for w in ["stock","have","available","price","cost"]):
+            return "stock_price"
+        if any(w in q for w in ["expir","batch","days until"]):
+            return "expiry"
+        if any(w in q for w in ["sold","sales","revenue","top","bottom"]):
+            return "sales"
+        if any(w in q for w in ["supplier","order from","lead time"]):
+            return "supplier"
         return "drug_info"
-
-    # ── Follow-up detection ───────────────────────────────────
-    followup_refs = [
-        "it", "these", "those", "them", "they",
-        "the same", "above", "mentioned", "you said", "tell me more",
-        "more about", "elaborate", "go on", "continue", "what else",
-        "expand", "in detail", "and what about", "how about",
-        "what about", "also", "another"
-    ]
-    if (conversation_history and len(q.split()) <= 8 and
-            any(ref in q_clean for ref in followup_refs)):
-        return "followup"
-
-    # ── CATEGORY BROWSE ───────────────────────────────────────
-    if any(w in q for w in [
-        "antibiotics", "antibiotic", "analgesics", "analgesic",
-        "antihypertensives", "antihypertensive",
-        "antidiabetics", "antidiabetic",
-        "antimalarials", "antimalarial",
-        "vitamins", "vitamin", "supplements",
-        "antifungals", "antifungal",
-        "gi medications", "gastrointestinal",
-        "respiratory", "antiretrovirals", "antiretroviral",
-        "arvs", "arv", "hiv drugs",
-        "list all", "show all", "all drugs", "all medicines"
-    ]):
-        return "category_browse"
-
-    # ── LOW STOCK ─────────────────────────────────────────────
-    if any(w in q for w in [
-        "low stock", "running low", "almost out", "reorder",
-        "need to order", "below reorder", "critical stock",
-        "running low on stock", "low on stock", "need reorder",
-        "stock alert", "drugs running", "which drugs are",
-        "what drugs are", "what products are"
-    ]):
-        return "low_stock"
-
-    # ── STOCK / PRICE ─────────────────────────────────────────
-    if any(w in q for w in [
-        "stock", "have", "available", "availability", "quantity",
-        "price", "cost", "how much", "in stock",
-        "do we have", "do you have", "shelf",
-        "cheapest", "most expensive", "lowest price", "highest price"
-    ]):
-        return "stock_price"
-
-    # ── EXPIRY ────────────────────────────────────────────────
-    if any(w in q for w in [
-        "expir", "expire", "expiry", "batch", "shelf life",
-        "best before", "use by", "when does", "days until",
-        "most urgent", "urgent batch", "needs action", "critical batch",
-        "when will", "how long until", "how many days"
-    ]):
-        return "expiry"
-
-    # ── SALES ─────────────────────────────────────────────────
-    if any(w in q for w in [
-        "sold", "sales", "revenue", "dispensed", "transaction",
-        "highest revenue", "performance", "turnover",
-        "customer type", "customer breakdown", "by customer",
-        "breakdown", "split by", "prescription sales",
-        "walk-in", "insurance sales"
-    ]):
-        return "sales"
-
-    # ── Default: drug info ────────────────────────────────────
-    return "drug_info"
-
-
-# ── Keyword extractor ─────────────────────────────────────────
-STOPWORDS = {
-    "what", "is", "the", "for", "do", "we", "have", "any", "of",
-    "tell", "me", "about", "price", "cost", "stock", "interact",
-    "with", "how", "much", "many", "does", "supplier", "supplies",
-    "supply", "who", "interacts", "use", "used", "expiry", "expire",
-    "when", "a", "an", "drug", "medicine", "medication", "our",
-    "give", "alternative", "substitute", "instead", "similar",
-    "whats", "can", "you", "recommend", "please", "there", "get",
-    "find", "show", "list", "all", "are", "in", "to", "from",
-    "that", "this", "on", "at", "by", "or", "and", "also", "its",
-    "which", "where", "would", "could", "should", "will", "was",
-    "been", "being", "has", "had", "not", "no", "yes"
-}
-
-
-def extract_keywords(question):
-    clean = re.sub(r"['\u2019?!,.]", "", question.lower())
-    return [w for w in clean.split() if w not in STOPWORDS and len(w) > 2]
-
-def get_search_term(question):
-    keywords = extract_keywords(question)
-    return keywords[0] if keywords else question.lower()
-
-# ═══════════════════════════════════════════════════════════════
-# OPERATIONAL FORMATTERS — Pure data, no GPT, no hallucination
-# ═══════════════════════════════════════════════════════════════
 
 def format_stock_price(question):
     q = question.lower()
@@ -1393,6 +1265,10 @@ def route_and_respond(question, intent, conversation_history=None):
         return format_supplier(question), "supplier knowledge graph", "operational"
     if intent == "alternative":
         return format_alternative(question), "inventory database", "operational"
+    if intent == "drug_summary":
+        drug_name = question.replace("quick summary:", "").replace("Quick summary:", "").strip()
+        answer = format_drug_summary(drug_name)
+        return answer, "inventory + batch records", "operational"
     if intent == "briefing":
         return format_daily_briefing(), "inventory + batch + transaction records", "operational"
     if intent == "reorder":
@@ -1540,7 +1416,7 @@ def click_quick_question(question, chat_history, search_history):
 
 def reask_from_history(selected_question, chat_history, search_history):
     if not selected_question:
-        return "", chat_history, search_history, gr.update(), gr.update()
+        return "", chat_history, search_history, gr.update(), gr.update(), ""
     return respond(selected_question, chat_history, search_history)
 
 # ── Featured drugs & quick questions ─────────────────────────
