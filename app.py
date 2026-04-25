@@ -137,6 +137,8 @@ def classify_intent(question, conversation_history=None):
     q_clean = q.strip("?!.,'’ ")
     if q_clean in GREETINGS or any(q_clean.startswith(g) for g in GREETINGS):
         return "greeting"
+    if any(g in q_clean for g in ["good morning", "good afternoon", "good evening", "good night"]):
+        return "greeting"
     if q_clean in THANKS:
         return "thanks"
     if q_clean in FAREWELLS:
@@ -172,10 +174,17 @@ def classify_intent(question, conversation_history=None):
 
 Rules:
 - Return ONLY the intent name, nothing else
-- If the question asks about specific drug stock/price/availability → stock_price
-- If the question asks about running low, below reorder, need to restock → low_stock
+- stock_price: "do we have X", "is X available", "price of X", "how much is X", "X in stock"
+- expiry: "when does X expire", "batches of X", "how many batches", "expiry of X", "X expiring", "how many batches of X", "batch count for X"
+- low_stock: "running low", "below reorder", "need restocking", "out of stock", "critical stock"
+- sales: "top selling", "bottom selling", "slow moving", "revenue", "transactions", "sold most"
+- category_browse: "list all X", "what X do we have", "show all X" where X is a drug category
+- stats: "how many categories", "inventory summary", "total products", "overview of stock", "how many drug types" — NOT for specific drug questions
+- drug_info: "what is X used for", "dosage of X", "side effects of X", "what does X treat"
+- interaction: "interacts with", "safe with", "combine X and Y", "X and Y together"
+- supplier: "who supplies X", "where do we order X", "supplier for X", "lead time"
 - If the question references "it", "them", "those", "the same" AND there is conversation history → followup
-- Default to drug_info if unsure{last_intent}
+- Default to stock_price if a specific drug name is mentioned without other context{last_intent}
 
 Question: {question}
 Intent:"""
@@ -197,16 +206,22 @@ Intent:"""
         return intent if intent in valid_intents else "drug_info"
     except Exception:
         # Fallback to keyword matching if GPT fails
-        if any(w in q for w in ["low","running","reorder","below","critical","out of"]):
+        if any(w in q for w in ["low","running low","reorder","below reorder","critical","out of"]):
             return "low_stock"
-        if any(w in q for w in ["stock","have","available","price","cost"]):
-            return "stock_price"
-        if any(w in q for w in ["expir","batch","days until"]):
+        if any(w in q for w in ["expir","batch","batches","days until","how many batches"]):
             return "expiry"
-        if any(w in q for w in ["sold","sales","revenue","top","bottom"]):
+        if any(w in q for w in ["sold","sales","revenue","top selling","bottom","slow moving"]):
             return "sales"
-        if any(w in q for w in ["supplier","order from","lead time"]):
+        if any(w in q for w in ["supplier","order from","lead time","who supplies"]):
             return "supplier"
+        if any(w in q for w in ["interact","safe with","combine","avoid"]):
+            return "interaction"
+        if any(w in q for w in ["alternative","substitute","instead of","replace"]):
+            return "alternative"
+        if any(w in q for w in ["categories","how many categories","inventory summary"]):
+            return "stats"
+        if any(w in q for w in ["stock","have","available","price","cost","cheapest"]):
+            return "stock_price"
         return "drug_info"
 
 # ── Keyword extractor ─────────────────────────────────────────
@@ -263,7 +278,9 @@ def format_stock_price(question):
                 break
         sql_c = "SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory"
         sql_c += (" WHERE category = %s" if cat_match else "")
-        sql_c += " ORDER BY selling_price_usd ASC LIMIT 5"
+        _nums = re.findall(r'\b(\d+)\b', q)
+        _lim = int(_nums[0]) if _nums else 5
+        sql_c += f" ORDER BY selling_price_usd ASC LIMIT {_lim}"
         conn = get_conn()
         try:
             df_c = pd.read_sql_query(sql_c, conn, params=(cat_match,) if cat_match else None)
@@ -276,7 +293,9 @@ def format_stock_price(question):
     if any(w in q for w in ["most expensive", "highest price", "most costly"]):
         conn = get_conn()
         try:
-            df_e = pd.read_sql_query("SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory ORDER BY selling_price_usd DESC LIMIT 5", conn)
+            _nums_e = re.findall(r'\b(\d+)\b', q)
+            _lim_e = int(_nums_e[0]) if _nums_e else 5
+            df_e = pd.read_sql_query(f"SELECT generic_name, brand_name, selling_price_usd, quantity_in_stock, shelf_location, category FROM inventory ORDER BY selling_price_usd DESC LIMIT {_lim_e}", conn)
         finally:
             release_conn(conn)
         header = "**Top 5 most expensive drugs:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
@@ -429,6 +448,51 @@ def format_low_stock():
 def format_expiry(question):
     q = question.lower()
     today = date.today()
+
+    # Specific drug batch query — "how many batches of X" or "when does X expire"
+    # Check if a specific drug name is mentioned alongside batch/expiry keywords
+    drug_keywords = extract_keywords(question)
+    specific_drug = None
+    if drug_keywords:
+        for kw in drug_keywords:
+            if kw not in {"batch","batches","expiry","expire","expires","days","soon","urgent","date","when","many","how"}:
+                conn = get_conn()
+                try:
+                    result = pd.read_sql_query(
+                        "SELECT generic_name FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1",
+                        conn, params=(f"%{kw}%",)
+                    )
+                finally:
+                    release_conn(conn)
+                if not result.empty:
+                    specific_drug = result.iloc[0]["generic_name"]
+                    break
+
+    if specific_drug:
+        conn = get_conn()
+        try:
+            df = pd.read_sql_query("""
+                SELECT b.batch_number, b.expiry_date,
+                       b.quantity_remaining,
+                       (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days
+                FROM batches b
+                JOIN inventory i ON b.product_id = i.product_id
+                WHERE LOWER(i.generic_name) LIKE %s
+                ORDER BY b.expiry_date ASC
+            """, conn, params=(f"%{specific_drug.lower()}%",))
+        finally:
+            release_conn(conn)
+        if df.empty:
+            return f"❌ No batch records found for {specific_drug}."
+        header = f"**{specific_drug} — {len(df)} batch(es) on record:**\n\n"
+        header += "| Batch | Expiry Date | Days Left | Qty | Status |\n|---|---|---|---|---|\n"
+        rows = []
+        for _, r in df.iterrows():
+            days = r["days"]
+            flag = "🚨 URGENT" if days < 30 else ("⚠️ Warning" if days < 90 else "✅ OK")
+            rows.append(f"| {r['batch_number']} | {str(r['expiry_date'])[:10]} | **{days}** | {r['quantity_remaining']} | {flag} |")
+        return header + "\n".join(rows)
+
     if any(w in q for w in [
         "soon", "this month", "next month", "90 days", "expiring",
         "about to expire", "near expiry", "earliest", "most urgent",
@@ -443,15 +507,19 @@ def format_expiry(question):
             JOIN inventory i ON b.product_id = i.product_id
             WHERE (b.expiry_date::date - CURRENT_DATE) <= 90
             ORDER BY b.expiry_date ASC
+            LIMIT %s
         """
+        nums = re.findall(r'\b(\d+)\b', question)
+        exp_limit = int(nums[0]) if nums else 10
+        exp_limit = max(1, min(exp_limit, 50))
         conn = get_conn()
         try:
-            df = pd.read_sql_query(sql, conn)
+            df = pd.read_sql_query(sql, conn, params=(exp_limit,))
         finally:
             release_conn(conn)
         if df.empty:
             return "✅ No batches expiring within the next 90 days."
-        header = f"**Batches expiring within 90 days** — {len(df)} batch(es):\n\n"
+        header = f"**Top {exp_limit} batches expiring soonest** — {len(df)} found:\n\n"
         header += "| Drug | Brand | Batch | Expiry Date | Days Left | Qty | Status |\n"
         header += "|---|---|---|---|---|---|---|\n"
         rows = []
@@ -773,7 +841,7 @@ def format_supplier(question):
             MATCH (s:Supplier)
             RETURN s.name AS supplier, s.lead_time AS lead_time_days,
                    s.city AS city, s.contact AS contact
-            ORDER BY s.lead_time ASC LIMIT 3
+            ORDER BY s.lead_time ASC LIMIT 5
         """
         results = run_cypher(cypher)
         if not results:
@@ -1027,7 +1095,10 @@ def format_daily_briefing():
     finally:
         release_conn(conn)
 
-    lines = [f"# 🌅 Good Morning! Daily Briefing — {today}\n"]
+    from datetime import datetime as _dt
+    hour = _dt.now().hour
+    tod = "Good Morning" if hour < 12 else ("Good Afternoon" if hour < 17 else "Good Evening")
+    lines = [f"# 🌅 {tod}! Daily Briefing — {today}\n"]
 
     # Revenue summary
     rev = df_rev.iloc[0]
@@ -1116,7 +1187,7 @@ def format_revenue_forecast():
             GROUP BY i.product_id, i.generic_name, i.brand_name,
                      i.quantity_in_stock, i.selling_price_usd
             ORDER BY (i.quantity_in_stock * i.selling_price_usd) DESC
-            LIMIT 10
+            LIMIT 15
         """, conn)
         df_daily = pd.read_sql_query("""
             SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily_revenue
@@ -1227,7 +1298,18 @@ def format_reconciliation(question):
 # MAIN ROUTER — dispatches to operational or clinical mode
 # ═══════════════════════════════════════════════════════════════
 
-GREETING_RESPONSE = """👋 Good morning! I am the **Netrisyl Pharmacy Assistant** for Sunrise Pharmacy.
+def get_greeting():
+    from datetime import datetime
+    hour = datetime.now().hour
+    if hour < 12:
+        tod = "Good morning"
+    elif hour < 17:
+        tod = "Good afternoon"
+    else:
+        tod = "Good evening"
+    return tod
+
+GREETING_RESPONSE = f"""👋 {get_greeting()}! I am the **Netrisyl Pharmacy Assistant** for Sunrise Pharmacy.
 
 **Type *Good morning* for your daily briefing** — low stock, urgent expiries, and yesterday's revenue in one message.
 
