@@ -145,6 +145,15 @@ SKIP_WORDS = {
     "anything", "something", "everything"
 }
 
+# Extra words that often confused entity extraction during testing.
+SKIP_WORDS.update({
+    "nearing", "near", "recent", "recently", "next", "first", "date", "dates",
+    "many", "much", "items", "products", "finished", "almost", "minimum",
+    "level", "levels", "outlook", "future", "right", "now", "still", "available",
+    "replenishment", "replenish", "restocking", "restock", "reorder", "vendor",
+    "buy", "bought", "source", "sources", "performing", "performance"
+})
+
 def extract_keywords(question: str) -> list:
     """Extract likely drug names and key terms from a question."""
     words = re.sub(r"[\'\u2019?!,.]", "", question.lower()).split()
@@ -308,181 +317,331 @@ TOOLS_SCHEMA = [
 
 
 
-def _is_casual_or_out_of_scope(q: str) -> bool:
-    """Return True for small talk or non-pharmacy questions that should not hit clinical search."""
-    q = q.lower().strip()
-    casual_patterns = [
-        "tell me a joke", "joke", "can you dance", "dance", "sing",
-        "who made you", "what is your favorite", "asdf", "asdfgh",
-        "random", "weather", "football", "movie"
-    ]
-    return any(p in q for p in casual_patterns)
+# ═══════════════════════════════════════════════════════════════
+# MASTER ROUTING HELPERS — deterministic guardrails before GPT
+# These helpers keep demo-critical workflows stable while still allowing
+# GPT tool-calling for flexible natural language.
+# ═══════════════════════════════════════════════════════════════
+
+DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+OUT_OF_SCOPE_PATTERNS = [
+    "tell me a joke", "joke", "can you dance", "dance", "sing", "song",
+    "who won", "world cup", "football", "soccer", "weather", "movie",
+    "president", "capital of", "recipe", "asdf", "asdfgh", "random"
+]
+
+THANKS_PATTERNS = ["thanks", "thank you", "thanks a lot", "thank", "appreciate", "much appreciated"]
+FAREWELL_PATTERNS = ["bye", "goodbye", "see you", "see ya", "later", "catch you", "take care", "ciao"]
+GREETING_PATTERNS = [
+    "hi", "hello", "hey", "hey there", "good morning", "morning", "morning boss",
+    "good afternoon", "afternoon", "good evening", "evening", "how are you", "start", "help"
+]
 
 
-def _extract_last_user_drug(conversation_history) -> str:
-    """Find the most recent drug-like term from previous user messages."""
-    if not conversation_history:
-        return ""
-    for turn in reversed(conversation_history):
-        if turn.get("role") != "user":
-            continue
-        content = turn.get("content", "")
-        kws = extract_keywords(content)
-        for kw in kws:
-            if kw.lower() not in {"what", "about", "tell", "more", "that", "sales", "batches"}:
-                match = fuzzy_match_drug(kw, threshold=70)
-                return match or kw
+def _clean_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s/+-]", " ", (text or "").lower())).strip()
+
+
+def _contains_any(q: str, patterns: list[str]) -> bool:
+    q = _clean_text(q)
+    return any(p in q for p in patterns)
+
+
+def _extract_limit(q: str, default: int = 10, max_limit: int = 50) -> int:
+    nums = re.findall(r"\b(\d+)\b", q or "")
+    if nums:
+        return max(1, min(int(nums[0]), max_limit))
+    words = {"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10}
+    ql = (q or "").lower()
+    for word, num in words.items():
+        if re.search(rf"\b{word}\b", ql):
+            return num
+    return default
+
+
+def _known_drug_candidates(text: str) -> list[dict]:
+    """Return generic/brand matches from the cached inventory master list."""
+    if DRUGS_DF is None or DRUGS_DF.empty or not text:
+        return []
+    text_l = _clean_text(text)
+    # Remove common non-entity words but keep slash drug combinations.
+    tokens = [t for t in re.split(r"\s+", text_l) if t and t not in SKIP_WORDS and len(t) >= 3]
+    candidates = []
+    seen = set()
+    for _, row in DRUGS_DF.iterrows():
+        generic = str(row.get("generic_name", ""))
+        brand = str(row.get("brand_name", ""))
+        generic_l = generic.lower()
+        brand_l = brand.lower()
+        score = 0
+        if generic_l and generic_l in text_l:
+            score = max(score, 100)
+        if brand_l and brand_l in text_l:
+            score = max(score, 98)
+        for tok in tokens:
+            if tok in generic_l or tok in brand_l:
+                # Ingredient/brand partial match.
+                score = max(score, 82 if len(tok) >= 5 else 72)
+            else:
+                score = max(score, SequenceMatcher(None, tok, generic_l).ratio() * 100)
+                if brand_l:
+                    score = max(score, SequenceMatcher(None, tok, brand_l).ratio() * 100)
+        if score >= 70:
+            key = generic.lower()
+            if key not in seen:
+                seen.add(key)
+                candidates.append({"generic": generic, "brand": brand, "score": score})
+    candidates.sort(key=lambda x: (-x["score"], x["generic"]))
+    return candidates
+
+
+def resolve_drug_name(text: str, allow_partial: bool = True) -> str:
+    """Resolve a drug/brand mention to a generic name when it is unambiguous."""
+    candidates = _known_drug_candidates(text)
+    if not candidates:
+        return fuzzy_match_drug(text, threshold=74) or text
+    if len(candidates) == 1:
+        return candidates[0]["generic"]
+    # If the best candidate is much better than the second, use it; otherwise keep the user's partial term.
+    if candidates[0]["score"] - candidates[1]["score"] >= 12:
+        return candidates[0]["generic"]
+    return text if allow_partial else candidates[0]["generic"]
+
+
+def _extract_drug_from_question(question: str) -> str:
+    candidates = _known_drug_candidates(question)
+    if candidates:
+        # For clear brand/exact matches return generic; for ingredient-only multiple matches, keep the term.
+        if len(candidates) == 1 or candidates[0]["score"] - candidates[1]["score"] >= 12:
+            return candidates[0]["generic"]
+    for kw in extract_keywords(question):
+        if kw not in {"about", "that", "more", "explain", "further", "sales", "stock", "expiry", "batches"}:
+            return resolve_drug_name(kw)
     return ""
 
 
-def _last_assistant_mentions(conversation_history, *terms) -> bool:
-    """Check whether the previous assistant response included a topic/source term."""
+def _last_assistant_text(conversation_history) -> str:
     if not conversation_history:
-        return False
+        return ""
     for turn in reversed(conversation_history):
-        if turn.get("role") == "assistant":
-            content = turn.get("content", "").lower()
-            return any(t.lower() in content for t in terms)
-    return False
+        if isinstance(turn, dict) and turn.get("role") == "assistant":
+            return turn.get("content", "").lower()
+    return ""
+
+
+def _last_user_text(conversation_history) -> str:
+    if not conversation_history:
+        return ""
+    for turn in reversed(conversation_history):
+        if isinstance(turn, dict) and turn.get("role") == "user":
+            return turn.get("content", "").lower()
+    return ""
+
+
+def _last_domain(conversation_history) -> str:
+    text = _last_assistant_text(conversation_history)
+    if "drug interaction knowledge graph" in text or "interacts" in text or "interaction" in text:
+        return "interaction"
+    if "batch records" in text or "expiry" in text or "batch" in text:
+        return "expiry"
+    if "transaction records" in text or "selling drugs" in text or "sales" in text:
+        return "sales"
+    if "supplier knowledge graph" in text or "supplier" in text:
+        return "supplier"
+    if "inventory database" in text or "stock" in text or "reorder level" in text:
+        return "inventory"
+    if "forecast" in text or "days of stock" in text:
+        return "forecast"
+    return ""
+
+
+def _is_explicit_followup(q: str) -> bool:
+    q = _clean_text(q)
+    return (
+        q.startswith("what about") or q.startswith("how about") or q.startswith("and ") or
+        q in {"explain further", "tell me more", "more", "continue", "go on"} or
+        any(p in q for p in ["tell me more", "more about that", "explain further", "expand on that"])
+    )
 
 
 def _rule_based_tool_override(question: str, conversation_history=None) -> dict | None:
-    """
-    Deterministic overrides for common demo questions.
-    These prevent GPT tool-calling from confusing phrases like 'least' with 'last week'.
-    """
-    q = question.lower().strip()
-    q_clean = re.sub(r"[^\w\s/-]", "", q)
+    """High-confidence deterministic routing before GPT tool-calling."""
+    q = _clean_text(question)
+    raw = (question or "").strip()
 
-    if _is_casual_or_out_of_scope(q_clean):
+    # System and out-of-domain handling.
+    if _contains_any(q, THANKS_PATTERNS):
+        return {"tool": "thanks", "params": {}, "confidence": 1.0}
+    if _contains_any(q, FAREWELL_PATTERNS):
+        return {"tool": "farewell", "params": {}, "confidence": 1.0}
+    if any(q == g or q.startswith(g) for g in GREETING_PATTERNS):
+        return {"tool": "greeting", "params": {}, "confidence": 1.0}
+    if _contains_any(q, OUT_OF_SCOPE_PATTERNS):
         return {"tool": "casual_response", "params": {}, "confidence": 1.0}
+    if q.startswith("quick summary"):
+        return {"tool": "drug_summary", "params": {"drug_name": raw.split(":", 1)[-1].strip()}, "confidence": 1.0}
 
-    followup_phrases = [
-        "tell me more", "more about that", "what about", "how about",
-        "and what about", "what about that", "expand on that"
-    ]
-    is_followup = any(p in q_clean for p in followup_phrases)
+    # Explicit follow-ups: use previous domain only when the current prompt is truly a follow-up.
+    if _is_explicit_followup(q):
+        domain = _last_domain(conversation_history)
+        day = next((d for d in DAY_NAMES if re.search(rf"\b{d}\b", q)), "")
+        drug = _extract_drug_from_question(question)
+        if day and domain == "sales":
+            return {"tool": "query_sales", "params": {"period": "day_of_week", "day_name": day, "direction": "top", "sort_by": "units", "limit": 10}, "confidence": 1.0}
+        if drug:
+            if domain == "expiry":
+                return {"tool": "query_expiry", "params": {"drug_name": drug, "within_days": 90, "limit": 10}, "confidence": 1.0}
+            if domain == "supplier":
+                return {"tool": "query_supplier", "params": {"drug_name": drug, "limit": 5}, "confidence": 1.0}
+            # For stock-related or ambiguous follow-up, default to stock lookup.
+            return {"tool": "query_inventory", "params": {"drug_name": drug, "filter": "all", "sort_by": "name", "limit": 10}, "confidence": 1.0}
+        if domain == "interaction":
+            drug = _extract_drug_from_question(_last_user_text(conversation_history))
+            return {"tool": "query_clinical", "params": {"drug_name": drug, "query_type": "interaction"}, "confidence": 1.0}
 
-    if is_followup:
-        current_kws = extract_keywords(question)
-        current_drug = ""
-        for kw in current_kws:
-            if kw not in {"tell", "more", "about", "that", "what"}:
-                current_drug = fuzzy_match_drug(kw, threshold=70) or kw
-                break
-        drug = current_drug or _extract_last_user_drug(conversation_history)
+    # Expiry/batch questions must resolve entities carefully before GPT.
+    if re.search(r"\b(expires first|expire first|earliest expiry|first to expire|next to expire|nearing expiry|near expiry|expiring soon|urgent expir|expires soon)\b", q):
+        limit = _extract_limit(q, default=10)
+        within = 30 if "urgent" in q or "this month" in q else 90
+        return {"tool": "query_expiry", "params": {"within_days": within, "limit": limit}, "confidence": 1.0}
+    if re.search(r"\b(batch|batches|expiry|expire|expires)\b", q):
+        limit = _extract_limit(q, default=10)
+        drug = _extract_drug_from_question(question)
+        params = {"within_days": 90, "limit": limit}
+        if drug and not re.search(r"\b(expires first|earliest|nearing|expiring soon|urgent)\b", q):
+            params["drug_name"] = drug
+        if re.search(r"\b(how many|count|number of)\b", q):
+            params["answer_type"] = "count"
+        if re.search(r"\b(next expiry|next expire|expiry date|expire date|when does|when will)\b", q):
+            params["answer_type"] = "next"
+        return {"tool": "query_expiry", "params": params, "confidence": 1.0}
 
-        if _last_assistant_mentions(conversation_history, "drug interaction knowledge graph", "interacts", "interaction"):
-            return {
-                "tool": "query_clinical",
-                "params": {"query_type": "interaction", "drug_name": drug},
-                "confidence": 0.9
-            }
-        if _last_assistant_mentions(conversation_history, "batch records", "expiry", "batch"):
-            return {
-                "tool": "query_expiry",
-                "params": {"drug_name": drug, "within_days": 90, "limit": 10},
-                "confidence": 0.9
-            }
-        if _last_assistant_mentions(conversation_history, "transaction records", "sales", "selling"):
-            for day in ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]:
-                if day in q_clean:
-                    return {
-                        "tool": "query_sales",
-                        "params": {"period": "day_of_week", "day_name": day, "direction": "top", "sort_by": "units", "limit": 10},
-                        "confidence": 0.9
-                    }
-
-    # Sales ranking must be checked before time-period logic.
-    if re.search(r"\b(top|best|highest|most)\b", q_clean) and re.search(r"\b(selling|sold|sales|drugs|products|units|revenue|transactions)\b", q_clean):
-        nums = re.findall(r"\b(\d+)\b", q_clean)
-        limit = int(nums[0]) if nums else 10
-        sort_by = "units" if re.search(r"\b(units?|quantity|volume|dispensed)\b", q_clean) else ("transactions" if "transaction" in q_clean else "revenue")
-        return {"tool": "query_sales", "params": {"period": "all_time", "direction": "top", "sort_by": sort_by, "limit": limit}, "confidence": 1.0}
-
-    if re.search(r"\b(least|lowest|bottom|worst|slow|fewest)\b", q_clean) and re.search(r"\b(selling|sold|sales|drugs|products|units|revenue|transactions)\b", q_clean):
-        nums = re.findall(r"\b(\d+)\b", q_clean)
-        limit = int(nums[0]) if nums else 10
-        sort_by = "units" if re.search(r"\b(units?|quantity|volume|dispensed)\b", q_clean) else ("transactions" if "transaction" in q_clean else "revenue")
-        return {"tool": "query_sales", "params": {"period": "all_time", "direction": "bottom", "sort_by": sort_by, "limit": limit}, "confidence": 1.0}
-
-    if re.search(r"\b(running low|low stock|restock|restocking|need reordering|needs reordering|below reorder|critical stock)\b", q_clean):
-        nums = re.findall(r"\b(\d+)\b", q_clean)
-        limit = int(nums[0]) if nums else 50
+    # Reorder / low stock: replenishment should not become top sellers.
+    if re.search(r"\b(reorder|restock|restocking|replenish|replenishment|almost finished|below minimum|minimum level|close to stockout|stockout|running low|low stock|below reorder|critical stock)\b", q):
+        limit = _extract_limit(q, default=50)
+        if re.search(r"\b(suggest|suggested|procurement|what should we reorder|what to order|order quantities|how many should)\b", q):
+            return {"tool": "query_reorder", "params": {}, "confidence": 1.0}
         return {"tool": "query_inventory", "params": {"filter": "below_reorder", "sort_by": "stock_pct", "limit": limit}, "confidence": 1.0}
 
-    if re.search(r"\b(expir|expiry|batch|batches)\b", q_clean):
-        nums = re.findall(r"\b(\d+)\b", q_clean)
-        limit = int(nums[0]) if nums else 10
-        kws = extract_keywords(question)
-        for kw in kws:
-            if kw not in {"batch", "batches", "expiry", "expire", "expires", "days", "soon", "next", "recently"}:
-                drug = fuzzy_match_drug(kw, threshold=70) or kw
-                return {"tool": "query_expiry", "params": {"drug_name": drug, "within_days": 90, "limit": limit}, "confidence": 1.0}
-        return {"tool": "query_expiry", "params": {"within_days": 90, "limit": limit}, "confidence": 1.0}
+    # Sales ranking before time-period sales.
+    if re.search(r"\b(top|best|highest|most|fastest|moving fastest|move fastest|hot|hottest)\b", q) and re.search(r"\b(selling|sellers|sold|sales|drugs|products|items|units|quantity|revenue|transactions|movers)\b", q):
+        limit = _extract_limit(q, default=10)
+        sort_by = "units" if re.search(r"\b(units?|quantity|volume|dispensed|fastest|movers|move fastest|moving fastest)\b", q) else ("transactions" if "transaction" in q else "revenue")
+        return {"tool": "query_sales", "params": {"period": "all_time", "direction": "top", "sort_by": sort_by, "limit": limit}, "confidence": 1.0}
+    if re.search(r"\b(least|lowest|bottom|worst|slow|fewest|poor)\b", q) and re.search(r"\b(selling|sellers|sold|sales|drugs|products|items|units|quantity|revenue|transactions|performing)\b", q):
+        limit = _extract_limit(q, default=10)
+        sort_by = "units" if re.search(r"\b(units?|quantity|volume|dispensed)\b", q) else ("transactions" if "transaction" in q else "revenue")
+        return {"tool": "query_sales", "params": {"period": "all_time", "direction": "bottom", "sort_by": sort_by, "limit": limit}, "confidence": 1.0}
+
+    # Time-based sales.
+    day = next((d for d in DAY_NAMES if re.search(rf"\b{d}\b", q)), "")
+    if day and re.search(r"\b(sales|performance|did we do|happened|sold)\b", q):
+        return {"tool": "query_sales", "params": {"period": "day_of_week", "day_name": day, "direction": "top", "sort_by": "units", "limit": 10}, "confidence": 1.0}
+    if re.search(r"\b(yesterday|last recorded day|latest day|what happened yesterday|recent sales|today)\b", q):
+        return {"tool": "query_sales", "params": {"period": "last_day", "direction": "top", "sort_by": "revenue", "limit": 10}, "confidence": 1.0}
+    if re.search(r"\b(last week|past week|this week)\b", q):
+        return {"tool": "query_sales", "params": {"period": "last_week", "direction": "top", "sort_by": "revenue", "limit": 10}, "confidence": 1.0}
+
+    # Forecast granularity.
+    if re.search(r"\b(forecast|projection|predict|outlook|how long will stock last|days of stock|stock last|run out)\b", q):
+        view = "combined"
+        if re.search(r"\b(30 day|30-day|revenue outlook|future revenue|predict future revenue|revenue forecast)\b", q):
+            view = "revenue"
+        if re.search(r"\b(how long will stock last|stock last|days of stock|run out)\b", q):
+            view = "stock"
+        return {"tool": "query_forecast", "params": {"view": view}, "confidence": 1.0}
+
+    # Supplier synonyms and city filters.
+    if re.search(r"\b(supplier|vendor|buy|source|wholesaler|distributor|delivers fastest|fastest supplier|lead time)\b", q):
+        city = ""
+        for c in ["harare", "bulawayo", "mutare"]:
+            if re.search(rf"\b{c}\b", q):
+                city = c.title()
+                break
+        if re.search(r"\b(fastest|shortest|quickest|lead time)\b", q):
+            return {"tool": "query_supplier", "params": {"sort_by": "lead_time", "limit": 5}, "confidence": 1.0}
+        drug = _extract_drug_from_question(question)
+        params = {"limit": 5}
+        if city:
+            params["city"] = city
+        if drug:
+            params["drug_name"] = drug
+        return {"tool": "query_supplier", "params": params, "confidence": 1.0}
+
+    # Price and stock lookups.
+    if re.search(r"\b(cheapest|lowest priced|lowest price|least expensive)\b", q):
+        category = _extract_category(q)
+        return {"tool": "query_inventory", "params": {"filter": "cheapest", "category": category, "sort_by": "price_asc", "limit": _extract_limit(q, 5)}, "confidence": 1.0}
+    if re.search(r"\b(most expensive|highest price|cost the most|costs the most)\b", q):
+        category = _extract_category(q)
+        return {"tool": "query_inventory", "params": {"filter": "most_expensive", "category": category, "sort_by": "price_desc", "limit": _extract_limit(q, 5)}, "confidence": 1.0}
+    if re.search(r"\b(stock|available|availability|in stock|do we have|still have|check stock)\b", q):
+        drug = _extract_drug_from_question(question)
+        params = {"filter": "all", "sort_by": "name", "limit": 10}
+        if drug:
+            params["drug_name"] = drug
+        return {"tool": "query_inventory", "params": params, "confidence": 1.0}
+
+    # Clinical.
+    if re.search(r"\b(interact|interaction|safe with|combine|avoid with|used with)\b", q):
+        drug = _extract_drug_from_question(question)
+        return {"tool": "query_clinical", "params": {"drug_name": drug, "query_type": "interaction"}, "confidence": 1.0}
+    if re.search(r"\b(used for|used to treat|side effects?|dose|dosage|contraindication|tell me about|what is)\b", q):
+        drug = _extract_drug_from_question(question)
+        return {"tool": "query_clinical", "params": {"drug_name": drug, "query_type": "drug_info"}, "confidence": 1.0}
 
     return None
 
 
+def _extract_category(q: str) -> str | None:
+    category_map = {
+        "antibiotic": "Antibiotics", "analgesic": "Analgesics",
+        "antihypertensive": "Antihypertensives", "antidiabetic": "Antidiabetics",
+        "antimalarial": "Antimalarials", "antifungal": "Antifungals",
+        "antiretroviral": "Antiretrovirals", "arv": "Antiretrovirals", "hiv": "Antiretrovirals",
+        "respiratory": "Respiratory", "vitamin": "Vitamins/Supplements", "supplement": "Vitamins/Supplements",
+        "gi": "GI medications", "gastrointestinal": "GI medications"
+    }
+    for key, value in category_map.items():
+        if re.search(rf"\b{re.escape(key)}s?\b", q):
+            return value
+    return None
+
+
 def casual_response() -> str:
-    """Friendly fallback for non-pharmacy questions."""
     return (
         "😄 I’m focused on Sunrise Pharmacy operations, so I’m best at helping with "
         "stock, prices, expiry batches, sales, suppliers, forecasts, and drug knowledge-graph questions.\n\n"
         "Try asking: *\"Which drugs are running low?\"* or *\"What interacts with metformin?\"*"
     )
 
-
 def classify_intent_with_tools(question: str, conversation_history=None) -> dict:
     """
-    Use GPT function calling to extract intent AND structured parameters.
-    GPT decides WHAT to query. Python executes SQL to get ACTUAL data.
-    Zero hallucination on figures — GPT never touches the numbers.
-
-    Returns: {"tool": str, "params": dict, "confidence": float}
+    Hybrid router: deterministic guardrails first, GPT tool-calling second.
+    GPT chooses intent only when a high-confidence rule does not already exist.
     """
     q = question.lower().strip()
-    q_clean = q.strip("?!.,'\u2019 ")
+    q_clean = _clean_text(q)
 
-    # Fast path — greetings/thanks/farewells need no GPT call
-    GREETINGS = {"hi","hello","hey","good morning","morning","good afternoon",
-                 "good evening","good night","howzit","how are you","whats up","what's up"}
-    THANKS    = {"thanks","thank you","thank","cheers","appreciated","great","ok","okay","cool","perfect","noted"}
-    FAREWELLS = {"bye","goodbye","see you","see ya","later","ciao","take care"}
-
-    if q_clean in GREETINGS or any(q_clean.startswith(g) for g in GREETINGS):
-        return {"tool": "greeting", "params": {}, "confidence": 1.0}
-    if any(g in q_clean for g in ["good morning","good afternoon","good evening","good night"]):
-        return {"tool": "greeting", "params": {}, "confidence": 1.0}
-    if q_clean in THANKS:
-        return {"tool": "thanks", "params": {}, "confidence": 1.0}
-    if q_clean in FAREWELLS:
-        return {"tool": "farewell", "params": {}, "confidence": 1.0}
-    if q.startswith("quick summary:"):
-        drug = question.replace("quick summary:", "").replace("Quick summary:", "").strip()
-        return {"tool": "drug_summary", "params": {"drug_name": drug}, "confidence": 1.0}
-
-    # Deterministic demo-safe overrides before GPT tool-calling.
     override = _rule_based_tool_override(question, conversation_history)
     if override:
         return override
 
-    # Build context note for followup detection
+    # Keep context small and only for true follow-up phrases to prevent context drift.
     context = ""
-    if conversation_history:
-        last = conversation_history[-1]
-        prev = last.get("content", "")[:200] if isinstance(last, dict) else ""
+    if conversation_history and _is_explicit_followup(q_clean):
+        prev = _last_assistant_text(conversation_history)[:300]
         if prev:
-            context = f"\n\nPrevious response context (for follow-up detection):\n{prev}"
+            context = f"\n\nPrevious response context for follow-up only:\n{prev}"
 
     system = (
-        "You are a pharmacy operations assistant. "
-        "Given a staff question, call the appropriate tool with precise parameters. "
-        "Extract numbers from the question for limit parameters. "
-        "Important routing rules: 'least selling', 'bottom selling', and 'lowest selling' mean bottom sales ranking, not last week. "
-        "'Top 5 drugs by units sold' means query_sales with period='all_time', direction='top', sort_by='units', limit=5. "
-        "'running low', 'need restocking', and 'below reorder' mean query_inventory with filter='below_reorder'. "
-        "For follow-up questions referencing 'it', 'them', 'those', or 'what about X', use the same domain as the previous response."
+        "You are a pharmacy operations assistant. Call exactly one tool with precise parameters. "
+        "Operational numbers must come from tools, never from your own knowledge. "
+        "Use query_inventory for stock/price/low-stock, query_expiry for batches/expiry, "
+        "query_sales for top/bottom sellers or date sales, query_supplier for vendors/suppliers, "
+        "query_forecast for revenue or stock forecasts, and query_clinical only for drug info/interactions. "
+        "Do not route casual or non-pharmacy questions to clinical."
     )
 
     try:
@@ -490,7 +649,7 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user",   "content": question + context}
+                {"role": "user", "content": question + context}
             ],
             tools=TOOLS_SCHEMA,
             tool_choice="auto",
@@ -501,9 +660,8 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         if msg.tool_calls:
             tc = msg.tool_calls[0]
             import json as _json
-            params = _json.loads(tc.function.arguments)
-            return {"tool": tc.function.name, "params": params, "confidence": 0.95}
-        # GPT chose not to call a tool — fall back
+            params = _json.loads(tc.function.arguments or "{}")
+            return {"tool": tc.function.name, "params": params, "confidence": 0.9}
         return _keyword_fallback_tool(q)
     except Exception as e:
         print(f"Tool calling failed: {e}")
@@ -511,24 +669,24 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
 
 
 def _keyword_fallback_tool(q: str) -> dict:
-    """Keyword fallback when GPT tool calling fails."""
-    if any(w in q for w in ["low","running low","reorder","below reorder","critical"]):
-        return {"tool": "query_inventory", "params": {"filter": "below_reorder", "limit": 10}, "confidence": 0.5}
-    if any(w in q for w in ["expir","batch","batches","days until"]):
+    """Safe fallback when GPT tool-calling fails."""
+    override = _rule_based_tool_override(q, None)
+    if override:
+        return override
+    q_clean = _clean_text(q)
+    if any(w in q_clean for w in ["low", "reorder", "restock", "stockout"]):
+        return {"tool": "query_inventory", "params": {"filter": "below_reorder", "sort_by": "stock_pct", "limit": 50}, "confidence": 0.5}
+    if any(w in q_clean for w in ["expir", "batch", "batches"]):
         return {"tool": "query_expiry", "params": {"within_days": 90, "limit": 10}, "confidence": 0.5}
-    if any(w in q for w in ["sold","sales","revenue","top","bottom","selling"]):
-        return {"tool": "query_sales", "params": {"period": "all_time", "direction": "top", "sort_by": "revenue", "limit": 10}, "confidence": 0.5}
-    if any(w in q for w in ["supplier","order from","lead time","who supplies"]):
+    if any(w in q_clean for w in ["sold", "sales", "revenue", "top", "bottom", "selling"]):
+        direction = "bottom" if any(w in q_clean for w in ["least", "lowest", "bottom", "worst"]) else "top"
+        sort_by = "units" if any(w in q_clean for w in ["unit", "quantity", "volume"]) else "revenue"
+        return {"tool": "query_sales", "params": {"period": "all_time", "direction": direction, "sort_by": sort_by, "limit": _extract_limit(q_clean, 10)}, "confidence": 0.5}
+    if any(w in q_clean for w in ["supplier", "vendor", "buy", "lead time"]):
         return {"tool": "query_supplier", "params": {}, "confidence": 0.5}
-    if any(w in q for w in ["interact","safe with","combine","avoid"]):
-        return {"tool": "query_clinical", "params": {"query_type": "interaction", "drug_name": extract_keywords(q)[0] if extract_keywords(q) else ""}, "confidence": 0.5}
-    if any(w in q for w in ["alternative","substitute","instead of","replace"]):
-        kws = extract_keywords(q)
-        return {"tool": "query_alternatives", "params": {"drug_name": kws[0] if kws else ""}, "confidence": 0.5}
-    if any(w in q for w in ["categories","how many categories","inventory summary"]):
-        return {"tool": "query_stats", "params": {}, "confidence": 0.5}
-    return {"tool": "query_clinical", "params": {"query_type": "drug_info", "drug_name": extract_keywords(q)[0] if extract_keywords(q) else q}, "confidence": 0.3}
-
+    if any(w in q_clean for w in ["interact", "safe with", "combine", "avoid"]):
+        return {"tool": "query_clinical", "params": {"query_type": "interaction", "drug_name": _extract_drug_from_question(q)}, "confidence": 0.5}
+    return {"tool": "casual_response", "params": {}, "confidence": 0.3}
 
 # ═══════════════════════════════════════════════════════════════
 # SQL EXECUTORS — each tool maps to a SQL executor
@@ -566,8 +724,9 @@ def execute_query_inventory(params: dict) -> str:
         order = "selling_price_usd DESC"
 
     if drug_name:
-        where_clauses.append("LOWER(generic_name) LIKE %s")
-        sql_params.append(f"%{drug_name.lower()}%")
+        drug_name = resolve_drug_name(drug_name)
+        where_clauses.append("(LOWER(generic_name) LIKE %s OR LOWER(brand_name) LIKE %s)")
+        sql_params.extend([f"%{drug_name.lower()}%", f"%{drug_name.lower()}%"])
 
     if category:
         # Fuzzy match category name
@@ -747,35 +906,43 @@ def execute_query_sales(params: dict) -> str:
 
 
 def execute_query_expiry(params: dict) -> str:
-    """Execute expiry query with GPT-provided parameters."""
+    """Execute expiry query with robust drug/entity handling."""
     drug_name   = params.get("drug_name")
-    within_days = params.get("within_days", 90)
-    limit       = max(1, min(params.get("limit", 10), 50))
+    within_days = int(params.get("within_days", 90) or 90)
+    limit       = max(1, min(int(params.get("limit", 10) or 10), 50))
+    answer_type = params.get("answer_type", "table")
 
     if drug_name:
-        # Specific drug batches
+        drug_name = resolve_drug_name(drug_name)
         conn = get_conn()
         try:
             df = pd.read_sql_query("""
-                SELECT b.batch_number, b.expiry_date, b.quantity_remaining,
+                SELECT i.generic_name, i.brand_name, b.batch_number, b.expiry_date,
+                       b.quantity_remaining,
                        (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days
                 FROM batches b JOIN inventory i ON b.product_id = i.product_id
-                WHERE LOWER(i.generic_name) LIKE %s
+                WHERE LOWER(i.generic_name) LIKE %s OR LOWER(i.brand_name) LIKE %s
                 ORDER BY b.expiry_date ASC
-            """, conn, params=(f"%{drug_name.lower()}%",))
+            """, conn, params=(f"%{drug_name.lower()}%", f"%{drug_name.lower()}%"))
         finally:
             release_conn(conn)
         if df.empty:
             return f"❌ No batch records found for {drug_name}."
-        header = f"**{drug_name} — {len(df)} batch(es):**\n\n| Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|\n"
-        rows = []
-        for _, r in df.iterrows():
-            d = r['days']
-            flag = "🚨 URGENT" if d < 30 else ("⚠️ Warning" if d < 90 else "✅ OK")
-            rows.append(f"| {r['batch_number']} | {str(r['expiry_date'])[:10]} | **{d}** | {r['quantity_remaining']} | {flag} |")
-        return header + "\n".join(rows)
+        display_name = df.iloc[0]["generic_name"] if len(df["generic_name"].unique()) == 1 else drug_name
+        if answer_type == "count":
+            return f"**{display_name} has {len(df)} batch(es) on record.**\n\n" + _format_batch_rows(df, include_drug=False)
+        if answer_type == "next":
+            r = df.iloc[0]
+            flag = "🚨 URGENT" if r['days'] < 30 else ("⚠️ Warning" if r['days'] < 90 else "✅ OK")
+            return (
+                f"**Next expiry for {r['generic_name']}**\n\n"
+                f"Batch **{r['batch_number']}** expires on **{str(r['expiry_date'])[:10]}** "
+                f"(**{r['days']} days left**), quantity remaining: **{r['quantity_remaining']}**. {flag}"
+            )
+        header = f"**{display_name} — {len(df)} batch(es):**\n\n"
+        return header + _format_batch_rows(df, include_drug=False)
 
-    # General expiry alert
+    # General expiry alert / earliest expiry list
     conn = get_conn()
     try:
         df = pd.read_sql_query("""
@@ -804,44 +971,63 @@ def execute_query_expiry(params: dict) -> str:
     return header + "\n".join(rows)
 
 
+def _format_batch_rows(df, include_drug: bool = False) -> str:
+    if include_drug:
+        header = "| Drug | Brand | Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|---|---|\n"
+    else:
+        header = "| Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|\n"
+    rows = []
+    for _, r in df.iterrows():
+        d = r.get('days', r.get('days_remaining'))
+        flag = "🚨 URGENT" if d < 30 else ("⚠️ Warning" if d < 90 else "✅ OK")
+        if include_drug:
+            rows.append(f"| {r['generic_name']} | {r['brand_name']} | {r['batch_number']} | {str(r['expiry_date'])[:10]} | **{d}** | {r['quantity_remaining']} | {flag} |")
+        else:
+            rows.append(f"| {r['batch_number']} | {str(r['expiry_date'])[:10]} | **{d}** | {r['quantity_remaining']} | {flag} |")
+    return header + "\n".join(rows)
+
+
 def execute_query_supplier(params: dict) -> str:
-    """Execute supplier query with GPT-provided parameters."""
+    """Execute supplier query with city filtering and synonym-friendly drug lookup."""
     drug_name = params.get("drug_name")
     city      = params.get("city")
     sort_by   = params.get("sort_by", "name")
-    limit     = max(1, min(params.get("limit", 5), 20))
+    limit     = max(1, min(int(params.get("limit", 5) or 5), 20))
 
-    if city or (not drug_name and sort_by == "lead_time"):
-        # City breakdown or lead time ranking
-        if sort_by == "lead_time" or (not city and not drug_name):
-            cypher = """
-                MATCH (s:Supplier)
-                RETURN s.name AS supplier, s.lead_time AS lead_time_days,
-                       s.city AS city, s.contact AS contact
-                ORDER BY s.lead_time ASC LIMIT 5
-            """
-            results = run_cypher(cypher)
-            if not results:
-                return "❌ No supplier information found."
-            header = "**Suppliers by lead time:**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
-            return header + "\n".join(
-                f"| {r['supplier']} | {r['lead_time_days']} days | {r['city']} | {r['contact']} |"
-                for r in results
-            )
-        # City filter
+    if sort_by == "lead_time" and not drug_name:
         cypher = """
             MATCH (s:Supplier)
-            RETURN s.city AS city, count(s) AS supplier_count, collect(s.name) AS suppliers
-            ORDER BY supplier_count DESC
+            RETURN s.name AS supplier, s.lead_time AS lead_time_days,
+                   s.city AS city, s.contact AS contact
+            ORDER BY s.lead_time ASC LIMIT $limit
         """
-        results = run_cypher(cypher)
-        header = "**Suppliers by City:**\n\n| City | Count | Suppliers |\n|---|---|---|\n"
+        results = run_cypher(cypher, {"limit": limit})
+        if not results:
+            return "❌ No supplier information found."
+        header = "**Suppliers by lead time:**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
         return header + "\n".join(
-            f"| {r['city']} | {r['supplier_count']} | {', '.join(r['suppliers'])} |"
+            f"| {r['supplier']} | {r['lead_time_days']} days | {r['city']} | {r['contact']} |"
+            for r in results
+        )
+
+    if city and not drug_name:
+        results = run_cypher("""
+            MATCH (s:Supplier)
+            WHERE toLower(s.city) CONTAINS toLower($city)
+            RETURN s.name AS supplier, s.lead_time AS lead_time_days,
+                   s.city AS city, s.contact AS contact, s.phone AS phone
+            ORDER BY s.name ASC LIMIT $limit
+        """, {"city": city, "limit": limit})
+        if not results:
+            return f"❌ No suppliers found in {city}."
+        header = f"**Suppliers in {city}:**\n\n| Supplier | Lead Time | Contact | Phone |\n|---|---|---|---|\n"
+        return header + "\n".join(
+            f"| {r['supplier']} | {r['lead_time_days']} days | {r['contact']} | {r.get('phone','')} |"
             for r in results
         )
 
     if drug_name:
+        drug_name = resolve_drug_name(drug_name, allow_partial=False)
         results = run_cypher("""
             MATCH (d:Drug)-[:SUPPLIED_BY]->(s:Supplier)
             WHERE toLower(d.generic_name) CONTAINS toLower($search)
@@ -849,8 +1035,8 @@ def execute_query_supplier(params: dict) -> str:
                    s.contact AS contact, s.phone AS phone,
                    s.city AS city, s.lead_time AS lead_time_days,
                    s.payment_terms AS payment_terms
-            LIMIT 5
-        """, {"search": drug_name})
+            LIMIT $limit
+        """, {"search": drug_name, "limit": limit})
         if not results:
             return f"❌ No supplier found for {drug_name}."
         r = results[0]
@@ -865,7 +1051,6 @@ def execute_query_supplier(params: dict) -> str:
             f"| Payment Terms | {r['payment_terms']} |\n"
         )
 
-    # Default — city breakdown
     results = run_cypher("""
         MATCH (s:Supplier)
         RETURN s.city AS city, count(s) AS supplier_count, collect(s.name) AS suppliers
@@ -876,7 +1061,6 @@ def execute_query_supplier(params: dict) -> str:
         f"| {r['city']} | {r['supplier_count']} | {', '.join(r['suppliers'])} |"
         for r in results
     )
-
 
 
 
@@ -1805,8 +1989,8 @@ def format_reorder_list():
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 3: REVENUE FORECAST
 # ═══════════════════════════════════════════════════════════════
-def format_revenue_forecast():
-    """Project revenue and stock depletion at current sales rate"""
+def format_revenue_forecast(view="combined"):
+    """Project revenue and/or stock depletion at current sales rate."""
     conn = get_conn()
     try:
         df = pd.read_sql_query("""
@@ -1832,10 +2016,19 @@ def format_revenue_forecast():
     forecast_30 = round(avg_daily_rev * 30, 2)
     forecast_90 = round(avg_daily_rev * 90, 2)
 
-    lines = ["## 📈 Revenue & Stock Forecast\n"]
-    lines.append(f"**Average Daily Revenue:** ${avg_daily_rev:,.2f}")
-    lines.append(f"**30-Day Revenue Forecast:** ${forecast_30:,.2f}")
-    lines.append(f"**90-Day Revenue Forecast:** ${forecast_90:,.2f}\n")
+    if view == "revenue":
+        return (
+            "## 📈 Revenue Forecast\n\n"
+            f"**Average Daily Revenue:** ${avg_daily_rev:,.2f}\n"
+            f"**30-Day Revenue Forecast:** ${forecast_30:,.2f}\n"
+            f"**90-Day Revenue Forecast:** ${forecast_90:,.2f}"
+        )
+
+    lines = ["## 📦 Stock Depletion Forecast\n" if view == "stock" else "## 📈 Revenue & Stock Forecast\n"]
+    if view == "combined":
+        lines.append(f"**Average Daily Revenue:** ${avg_daily_rev:,.2f}")
+        lines.append(f"**30-Day Revenue Forecast:** ${forecast_30:,.2f}")
+        lines.append(f"**90-Day Revenue Forecast:** ${forecast_90:,.2f}\n")
     lines.append("**Days of Stock Remaining (Top 10 by value):**\n")
     lines.append("| Drug | Brand | Stock | Avg Daily Sales | Days Remaining |\n|---|---|---|---|---|")
     for _, r in df.iterrows():
@@ -1941,32 +2134,34 @@ def get_greeting():
     return tod
 
 def get_greeting_response(question=""):
-    """Generate a short, time-aware greeting response for demo use."""
-    from datetime import datetime as _dt, timezone, timedelta
-
-    # Sunrise Pharmacy is in Zimbabwe / Central Africa Time (UTC+2).
-    cat_tz = timezone(timedelta(hours=2))
-    hour = _dt.now(tz=cat_tz).hour
-
-    if hour < 12:
+    """Generate a short greeting. Mirror user's time-of-day wording when provided."""
+    q = (question or "").lower()
+    if "morning" in q:
         tod, emoji = "Good morning", "☀️"
-    elif hour < 17:
+    elif "afternoon" in q:
         tod, emoji = "Good afternoon", "🌤️"
-    else:
+    elif "evening" in q or "night" in q:
         tod, emoji = "Good evening", "🌙"
-
+    else:
+        from datetime import datetime as _dt, timezone, timedelta
+        cat_tz = timezone(timedelta(hours=2))
+        hour = _dt.now(tz=cat_tz).hour
+        if hour < 12:
+            tod, emoji = "Good morning", "☀️"
+        elif hour < 17:
+            tod, emoji = "Good afternoon", "🌤️"
+        else:
+            tod, emoji = "Good evening", "🌙"
     return (
         f"{emoji} {tod}! Welcome to the Sunrise Pharmacy Assistant.\n\n"
-        "You can ask about stock, prices, low-stock alerts, expiry batches, "
-        "sales, suppliers, forecasts, and clinical knowledge-graph information.\n\n"
+        "You can ask about stock, prices, low-stock alerts, expiry batches, sales, suppliers, forecasts, and clinical knowledge-graph information.\n\n"
         "**Try:**\n"
         "- *\"Do we have amoxicillin in stock?\"*\n"
         "- *\"Which drugs need restocking?\"*\n"
         "- *\"What are our top selling drugs?\"*\n"
         "- *\"Which batches are expiring soon?\"*\n"
         "- *\"What interacts with metformin?\"*\n\n"
-        "💡 Ask for **\"daily briefing\"** to get low stock, urgent expiries, "
-        "and latest revenue in one message."
+        "💡 Ask for **\"daily briefing\"** to get low stock, urgent expiries, and latest revenue in one message."
     )
 
 GREETING_RESPONSE = get_greeting_response()
@@ -2006,7 +2201,6 @@ def route_and_respond(question, conversation_history=None):
     if tool == "casual_response":
         return casual_response(), "", "system"
 
-
     # ── Operational tool executors ─────────────────────────────
     if tool == "query_inventory":
         return _wrap(execute_query_inventory(params)), "inventory database", "operational"
@@ -2030,7 +2224,7 @@ def route_and_respond(question, conversation_history=None):
         return format_reorder_list(), "inventory + transaction records", "operational"
 
     if tool == "query_forecast":
-        return format_revenue_forecast(), "inventory + transaction records", "operational"
+        return format_revenue_forecast(params.get("view", "combined")), "inventory + transaction records", "operational"
 
     if tool == "query_reconciliation":
         drug = params.get("drug_name")
@@ -2065,11 +2259,7 @@ def route_and_respond(question, conversation_history=None):
             return _wrap(answer), "drug knowledge graph", "clinical"
 
     # ── Fallback ───────────────────────────────────────────────
-    data   = query_neo4j_drug_info(corrected_q)
-    answer = generate_clinical_answer(
-        corrected_q, "drug_info", "drug knowledge graph", data, conversation_history
-    )
-    return _wrap(answer), "drug knowledge graph", "clinical"
+    return casual_response(), "", "system"
 
 
 
@@ -2124,11 +2314,7 @@ def respond(message, chat_history, search_history):
             full_answer = f"{header}{answer}"
 
     except Exception as e:
-        print(f"Runtime error in respond(): {e}")
-        full_answer = (
-            "Sorry — I hit a technical issue while processing that request. "
-            "Please try again, or use a more specific pharmacy question."
-        )
+        full_answer = f"An error occurred: {str(e)}\nPlease try rephrasing your question."
 
     chat_history = list(chat_history or [])
     chat_history.append({"role": "user",      "content": message})
