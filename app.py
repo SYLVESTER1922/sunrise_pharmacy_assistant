@@ -1,33 +1,3 @@
-"""
-Netrisyl Pharmacy Assistant — Single-File Demo App
-=================================================
-
-Purpose
--------
-A Gradio-based pharmacy operations and clinical assistant for Sunrise Pharmacy.
-
-Design Principles
------------------
-1. Operational answers are deterministic: PostgreSQL/Supabase queries return stock,
-   price, sales, expiry, reorder, forecast, and reconciliation results.
-2. Graph-backed answers use Neo4j for suppliers, drug knowledge, and interactions.
-3. LLM use is controlled: GPT is used for intent/tool selection and for clinical
-   summaries grounded only in retrieved knowledge-graph data.
-4. This file is intentionally kept as one deployable app.py for Hugging Face demos.
-
-Deployment Notes
-----------------
-Set these environment variables in Hugging Face Spaces secrets:
-- SUPABASE_URL
-- NEO4J_URI
-- NEO4J_USERNAME
-- NEO4J_PASSWORD
-- OPENAI_API_KEY
-"""
-
-# ═══════════════════════════════════════════════════════════════
-# 1. IMPORTS
-# ═══════════════════════════════════════════════════════════════
 import os
 import re
 import psycopg2
@@ -40,10 +10,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, date
 import json
 
-# ═══════════════════════════════════════════════════════════════
-# 2. ENVIRONMENT CONFIGURATION + CLIENT SETUP
-# ═══════════════════════════════════════════════════════════════
-# Credentials are read from Hugging Face / local environment variables.
+# ── Credentials ───────────────────────────────────────────────
 NEO4J_URI      = os.environ.get("NEO4J_URI")
 NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
@@ -68,9 +35,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 driver = get_driver()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ═══════════════════════════════════════════════════════════════
-# 3. POSTGRESQL / SUPABASE CONNECTION POOL
-# ═══════════════════════════════════════════════════════════════
+# ── Supabase PostgreSQL connection ───────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 
 # Connection pool — thread safe, reuses connections efficiently
@@ -95,10 +60,7 @@ def release_conn(conn):
 
 print("Supabase connection pool ready ✓")
 
-# ═══════════════════════════════════════════════════════════════
-# 4. STARTUP DATA LOAD
-# ═══════════════════════════════════════════════════════════════
-# Drug names are cached for fast fuzzy matching and quick lookup dropdowns.
+# ── Load drug list ────────────────────────────────────────────
 def get_all_drugs():
     conn = get_conn()
     try:
@@ -113,9 +75,7 @@ def get_all_drugs():
 DRUGS_DF   = get_all_drugs()
 DRUG_NAMES = DRUGS_DF["generic_name"].tolist()
 
-# ═══════════════════════════════════════════════════════════════
-# 5. FUZZY DRUG NAME MATCHING
-# ═══════════════════════════════════════════════════════════════
+# ── Fuzzy drug name matching ──────────────────────────────────
 def fuzzy_match_drug(text, threshold=78):
     text = re.sub(r"['\u2019\u2018`]", "", text.lower().strip())
     best_score = 0
@@ -155,9 +115,7 @@ def fuzzy_correct_question(question):
     note = f"*(Auto-corrected: {', '.join(corrections)})*" if corrections else ""
     return corrected, note
 
-# ═══════════════════════════════════════════════════════════════
-# 6. SYSTEM INTENTS + GPT TOOL-CALLING SETUP
-# ═══════════════════════════════════════════════════════════════
+# ── Intent classification ─────────────────────────────────────
 GREETINGS = {
     "hi", "hey", "hello", "good morning", "good afternoon",
     "good evening", "help", "what can you do", "how are you",
@@ -171,7 +129,7 @@ FAREWELLS = {"bye", "goodbye", "see you", "later", "exit", "quit"}
 # GPT decides intent AND parameters → Python executes SQL → zero hallucination
 # ═══════════════════════════════════════════════════════════════
 
-# ── Keyword extraction helpers ────────────────────────────────
+# ── Keyword extractor ─────────────────────────────────────────
 SKIP_WORDS = {
     "what", "which", "who", "where", "when", "how", "why", "is", "are",
     "was", "were", "do", "does", "did", "have", "has", "had", "will",
@@ -349,6 +307,132 @@ TOOLS_SCHEMA = [
 ]
 
 
+
+def _is_casual_or_out_of_scope(q: str) -> bool:
+    """Return True for small talk or non-pharmacy questions that should not hit clinical search."""
+    q = q.lower().strip()
+    casual_patterns = [
+        "tell me a joke", "joke", "can you dance", "dance", "sing",
+        "who made you", "what is your favorite", "asdf", "asdfgh",
+        "random", "weather", "football", "movie"
+    ]
+    return any(p in q for p in casual_patterns)
+
+
+def _extract_last_user_drug(conversation_history) -> str:
+    """Find the most recent drug-like term from previous user messages."""
+    if not conversation_history:
+        return ""
+    for turn in reversed(conversation_history):
+        if turn.get("role") != "user":
+            continue
+        content = turn.get("content", "")
+        kws = extract_keywords(content)
+        for kw in kws:
+            if kw.lower() not in {"what", "about", "tell", "more", "that", "sales", "batches"}:
+                match = fuzzy_match_drug(kw, threshold=70)
+                return match or kw
+    return ""
+
+
+def _last_assistant_mentions(conversation_history, *terms) -> bool:
+    """Check whether the previous assistant response included a topic/source term."""
+    if not conversation_history:
+        return False
+    for turn in reversed(conversation_history):
+        if turn.get("role") == "assistant":
+            content = turn.get("content", "").lower()
+            return any(t.lower() in content for t in terms)
+    return False
+
+
+def _rule_based_tool_override(question: str, conversation_history=None) -> dict | None:
+    """
+    Deterministic overrides for common demo questions.
+    These prevent GPT tool-calling from confusing phrases like 'least' with 'last week'.
+    """
+    q = question.lower().strip()
+    q_clean = re.sub(r"[^\w\s/-]", "", q)
+
+    if _is_casual_or_out_of_scope(q_clean):
+        return {"tool": "casual_response", "params": {}, "confidence": 1.0}
+
+    followup_phrases = [
+        "tell me more", "more about that", "what about", "how about",
+        "and what about", "what about that", "expand on that"
+    ]
+    is_followup = any(p in q_clean for p in followup_phrases)
+
+    if is_followup:
+        current_kws = extract_keywords(question)
+        current_drug = ""
+        for kw in current_kws:
+            if kw not in {"tell", "more", "about", "that", "what"}:
+                current_drug = fuzzy_match_drug(kw, threshold=70) or kw
+                break
+        drug = current_drug or _extract_last_user_drug(conversation_history)
+
+        if _last_assistant_mentions(conversation_history, "drug interaction knowledge graph", "interacts", "interaction"):
+            return {
+                "tool": "query_clinical",
+                "params": {"query_type": "interaction", "drug_name": drug},
+                "confidence": 0.9
+            }
+        if _last_assistant_mentions(conversation_history, "batch records", "expiry", "batch"):
+            return {
+                "tool": "query_expiry",
+                "params": {"drug_name": drug, "within_days": 90, "limit": 10},
+                "confidence": 0.9
+            }
+        if _last_assistant_mentions(conversation_history, "transaction records", "sales", "selling"):
+            for day in ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]:
+                if day in q_clean:
+                    return {
+                        "tool": "query_sales",
+                        "params": {"period": "day_of_week", "day_name": day, "direction": "top", "sort_by": "units", "limit": 10},
+                        "confidence": 0.9
+                    }
+
+    # Sales ranking must be checked before time-period logic.
+    if re.search(r"\b(top|best|highest|most)\b", q_clean) and re.search(r"\b(selling|sold|sales|drugs|products|units|revenue|transactions)\b", q_clean):
+        nums = re.findall(r"\b(\d+)\b", q_clean)
+        limit = int(nums[0]) if nums else 10
+        sort_by = "units" if re.search(r"\b(units?|quantity|volume|dispensed)\b", q_clean) else ("transactions" if "transaction" in q_clean else "revenue")
+        return {"tool": "query_sales", "params": {"period": "all_time", "direction": "top", "sort_by": sort_by, "limit": limit}, "confidence": 1.0}
+
+    if re.search(r"\b(least|lowest|bottom|worst|slow|fewest)\b", q_clean) and re.search(r"\b(selling|sold|sales|drugs|products|units|revenue|transactions)\b", q_clean):
+        nums = re.findall(r"\b(\d+)\b", q_clean)
+        limit = int(nums[0]) if nums else 10
+        sort_by = "units" if re.search(r"\b(units?|quantity|volume|dispensed)\b", q_clean) else ("transactions" if "transaction" in q_clean else "revenue")
+        return {"tool": "query_sales", "params": {"period": "all_time", "direction": "bottom", "sort_by": sort_by, "limit": limit}, "confidence": 1.0}
+
+    if re.search(r"\b(running low|low stock|restock|restocking|need reordering|needs reordering|below reorder|critical stock)\b", q_clean):
+        nums = re.findall(r"\b(\d+)\b", q_clean)
+        limit = int(nums[0]) if nums else 50
+        return {"tool": "query_inventory", "params": {"filter": "below_reorder", "sort_by": "stock_pct", "limit": limit}, "confidence": 1.0}
+
+    if re.search(r"\b(expir|expiry|batch|batches)\b", q_clean):
+        nums = re.findall(r"\b(\d+)\b", q_clean)
+        limit = int(nums[0]) if nums else 10
+        kws = extract_keywords(question)
+        for kw in kws:
+            if kw not in {"batch", "batches", "expiry", "expire", "expires", "days", "soon", "next", "recently"}:
+                drug = fuzzy_match_drug(kw, threshold=70) or kw
+                return {"tool": "query_expiry", "params": {"drug_name": drug, "within_days": 90, "limit": limit}, "confidence": 1.0}
+        return {"tool": "query_expiry", "params": {"within_days": 90, "limit": limit}, "confidence": 1.0}
+
+    return None
+
+
+def casual_response() -> str:
+    """Friendly fallback for non-pharmacy questions."""
+    return (
+        "😄 I’m focused on Sunrise Pharmacy operations, so I’m best at helping with "
+        "stock, prices, expiry batches, sales, suppliers, forecasts, and drug knowledge-graph questions.\n\n"
+        "Try asking: *\"Which drugs are running low?\"* or *\"What interacts with metformin?\"*"
+    )
+
+
 def classify_intent_with_tools(question: str, conversation_history=None) -> dict:
     """
     Use GPT function calling to extract intent AND structured parameters.
@@ -378,6 +462,11 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         drug = question.replace("quick summary:", "").replace("Quick summary:", "").strip()
         return {"tool": "drug_summary", "params": {"drug_name": drug}, "confidence": 1.0}
 
+    # Deterministic demo-safe overrides before GPT tool-calling.
+    override = _rule_based_tool_override(question, conversation_history)
+    if override:
+        return override
+
     # Build context note for followup detection
     context = ""
     if conversation_history:
@@ -390,7 +479,10 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         "You are a pharmacy operations assistant. "
         "Given a staff question, call the appropriate tool with precise parameters. "
         "Extract numbers from the question for limit parameters. "
-        "For follow-up questions referencing 'it', 'them', 'those' — use the same tool as the previous response."
+        "Important routing rules: 'least selling', 'bottom selling', and 'lowest selling' mean bottom sales ranking, not last week. "
+        "'Top 5 drugs by units sold' means query_sales with period='all_time', direction='top', sort_by='units', limit=5. "
+        "'running low', 'need restocking', and 'below reorder' mean query_inventory with filter='below_reorder'. "
+        "For follow-up questions referencing 'it', 'them', 'those', or 'what about X', use the same domain as the previous response."
     )
 
     try:
@@ -439,9 +531,9 @@ def _keyword_fallback_tool(q: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 7. GPT TOOL EXECUTORS
+# SQL EXECUTORS — each tool maps to a SQL executor
+# GPT provides parameters, Python builds and runs safe SQL
 # ═══════════════════════════════════════════════════════════════
-# GPT selects the tool and parameters; Python executes SQL/Cypher and formats real data.
 
 def execute_query_inventory(params: dict) -> str:
     """Execute inventory query with GPT-provided parameters."""
@@ -503,7 +595,7 @@ def execute_query_inventory(params: dict) -> str:
                quantity_in_stock, reorder_level, selling_price_usd,
                cost_price_usd, shelf_location, category,
                ROUND((quantity_in_stock::numeric/NULLIF(reorder_level,0))*100,0) AS stock_pct,
-               ROUND(((selling_price_usd - cost_price_usd)/NULLIF(selling_price_usd,0))*100,1) AS margin
+               ROUND((((selling_price_usd - cost_price_usd)/NULLIF(selling_price_usd,0))*100)::numeric,1) AS margin
         FROM inventory
         {where}
         ORDER BY {order}
@@ -788,11 +880,6 @@ def execute_query_supplier(params: dict) -> str:
 
 
 
-
-# ═══════════════════════════════════════════════════════════════
-# 8. DIRECT OPERATIONAL FORMATTERS — INVENTORY, SALES, EXPIRY,
-#    SUPPLIERS, ALTERNATIVES, AND DRUG SUMMARY
-# ═══════════════════════════════════════════════════════════════
 def format_stock_price(question):
     q = question.lower()
     categories = {
@@ -1492,7 +1579,7 @@ def format_drug_summary(drug_name):
 {expiry_line}"""
 
 # ═══════════════════════════════════════════════════════════════
-# 9. CLINICAL MODE — GRAPH-RETRIEVED DATA + STRICT GPT GROUNDING
+# CLINICAL MODE — GPT with strict grounding + disclaimer
 # ═══════════════════════════════════════════════════════════════
 
 CLINICAL_DISCLAIMER = (
@@ -1590,10 +1677,6 @@ def query_neo4j_drug_info(question):
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 1: DAILY BRIEFING
 # ═══════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════
-# 10. DAILY BRIEFING FEATURE
-# ═══════════════════════════════════════════════════════════════
 def format_daily_briefing():
     """Morning briefing — low stock + urgent expiry + yesterday revenue"""
     from datetime import date as date_obj
@@ -1681,10 +1764,6 @@ def format_daily_briefing():
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 2: REORDER ACTION LIST
 # ═══════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════
-# 11. PROCUREMENT / REORDER ACTION LIST
-# ═══════════════════════════════════════════════════════════════
 def format_reorder_list():
     """Complete procurement action list with suggested order quantities"""
     conn = get_conn()
@@ -1726,10 +1805,6 @@ def format_reorder_list():
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 3: REVENUE FORECAST
 # ═══════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════
-# 12. REVENUE + STOCK DEPLETION FORECAST
-# ═══════════════════════════════════════════════════════════════
 def format_revenue_forecast():
     """Project revenue and stock depletion at current sales rate"""
     conn = get_conn()
@@ -1743,7 +1818,7 @@ def format_revenue_forecast():
             GROUP BY i.product_id, i.generic_name, i.brand_name,
                      i.quantity_in_stock, i.selling_price_usd
             ORDER BY (i.quantity_in_stock * i.selling_price_usd) DESC
-            LIMIT 15
+            LIMIT 10
         """, conn)
         df_daily = pd.read_sql_query("""
             SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily_revenue
@@ -1806,10 +1881,6 @@ def format_multi_interaction(question):
 # ═══════════════════════════════════════════════════════════════
 # NEW FEATURE 6: SALES vs INVENTORY RECONCILIATION
 # ═══════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════
-# 13. SALES VS INVENTORY RECONCILIATION
-# ═══════════════════════════════════════════════════════════════
 def format_reconciliation(question):
     """Compare sales vs stock movement to flag discrepancies"""
     keywords = extract_keywords(question)
@@ -1855,7 +1926,7 @@ def format_reconciliation(question):
     return header + "\n".join(rows) + "\n\n*Discrepancy = Received − Sold − Current Stock. Non-zero may indicate theft, wastage or data entry errors.*"
 
 # ═══════════════════════════════════════════════════════════════
-# 14. MAIN ROUTER — DISPATCHES TO OPERATIONAL OR CLINICAL MODE
+# MAIN ROUTER — dispatches to operational or clinical mode
 # ═══════════════════════════════════════════════════════════════
 
 def get_greeting():
@@ -1870,27 +1941,32 @@ def get_greeting():
     return tod
 
 def get_greeting_response(question=""):
-    """Generate a natural, time-aware greeting response."""
+    """Generate a short, time-aware greeting response for demo use."""
     from datetime import datetime as _dt, timezone, timedelta
-    cat_tz = timezone(timedelta(hours=2))  # CAT — Central Africa Time (UTC+2)
+
+    # Sunrise Pharmacy is in Zimbabwe / Central Africa Time (UTC+2).
+    cat_tz = timezone(timedelta(hours=2))
     hour = _dt.now(tz=cat_tz).hour
+
     if hour < 12:
-        tod, emoji = "Good morning", "🌅"
+        tod, emoji = "Good morning", "☀️"
     elif hour < 17:
-        tod, emoji = "Good afternoon", "☀️"
+        tod, emoji = "Good afternoon", "🌤️"
     else:
         tod, emoji = "Good evening", "🌙"
+
     return (
         f"{emoji} {tod}! Welcome to the Sunrise Pharmacy Assistant.\n\n"
-        "Just ask me anything about the pharmacy — I understand natural language. For example:\n\n"
+        "You can ask about stock, prices, low-stock alerts, expiry batches, "
+        "sales, suppliers, forecasts, and clinical knowledge-graph information.\n\n"
+        "**Try:**\n"
         "- *\"Do we have amoxicillin in stock?\"*\n"
-        "- *\"Which drugs need reordering?\"*\n"
-        "- *\"What interacts with metformin?\"*\n"
-        "- *\"Who supplies ciprofloxacin?\"*\n"
+        "- *\"Which drugs need restocking?\"*\n"
         "- *\"What are our top selling drugs?\"*\n"
-        "- *\"Which batches are expiring soon?\"*\n\n"
-        "💡 **Tip:** Ask for a **\"daily briefing\"** to get low stock, urgent expiries "
-        "and yesterday\'s revenue all in one message."
+        "- *\"Which batches are expiring soon?\"*\n"
+        "- *\"What interacts with metformin?\"*\n\n"
+        "💡 Ask for **\"daily briefing\"** to get low stock, urgent expiries, "
+        "and latest revenue in one message."
     )
 
 GREETING_RESPONSE = get_greeting_response()
@@ -1899,12 +1975,6 @@ THANKS_RESPONSE   = "You're welcome! Feel free to ask anytime. 😊"
 FAREWELL_RESPONSE = "Goodbye! Come back anytime you need help. 👋"
 
 
-
-
-# Router design note:
-# - System intents return static assistant messages.
-# - Operational requests return deterministic database results.
-# - Clinical requests retrieve graph data first, then summarize with strict grounding.
 
 def route_and_respond(question, conversation_history=None):
     """
@@ -1933,6 +2003,9 @@ def route_and_respond(question, conversation_history=None):
         return FAREWELL_RESPONSE, "", "system"
     if tool == "drug_summary":
         return _wrap(format_drug_summary(params.get("drug_name", ""))), "inventory + batch records", "operational"
+    if tool == "casual_response":
+        return casual_response(), "", "system"
+
 
     # ── Operational tool executors ─────────────────────────────
     if tool == "query_inventory":
@@ -2051,7 +2124,11 @@ def respond(message, chat_history, search_history):
             full_answer = f"{header}{answer}"
 
     except Exception as e:
-        full_answer = f"An error occurred: {str(e)}\nPlease try rephrasing your question."
+        print(f"Runtime error in respond(): {e}")
+        full_answer = (
+            "Sorry — I hit a technical issue while processing that request. "
+            "Please try again, or use a more specific pharmacy question."
+        )
 
     chat_history = list(chat_history or [])
     chat_history.append({"role": "user",      "content": message})
@@ -2106,9 +2183,7 @@ def reask_from_history(selected_question, chat_history, search_history):
         return "", chat_history, search_history, gr.update(), gr.update(), ""
     return respond(selected_question, chat_history, search_history)
 
-# ═══════════════════════════════════════════════════════════════
-# 16. DEMO CONTENT — FEATURED DRUGS + QUICK QUESTIONS
-# ═══════════════════════════════════════════════════════════════
+# ── Featured drugs & quick questions ─────────────────────────
 FEATURED_DRUGS = [
     "Amoxicillin", "Paracetamol", "Metformin", "Ibuprofen",
     "Ciprofloxacin", "Azithromycin", "Amlodipine", "Losartan",
@@ -2126,9 +2201,7 @@ QUICK_QUESTIONS = [
     "What interacts with metformin?"
 ]
 
-# ═══════════════════════════════════════════════════════════════
-# 17. GRADIO USER INTERFACE
-# ═══════════════════════════════════════════════════════════════
+# ── Gradio UI ─────────────────────────────────────────────────
 with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     gr.HTML("""
