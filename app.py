@@ -2413,7 +2413,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
         # ── CENTRE — Chat ─────────────────────────────────────
         with gr.Column(scale=3, min_width=400):
-            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True, type="messages")
+            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True)
             # Drug chips removed
             brief_box = gr.Textbox(
                 label="💡 Key Points",
