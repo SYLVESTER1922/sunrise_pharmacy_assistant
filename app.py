@@ -1574,8 +1574,8 @@ def drug_summary_respond(drug_name, chat_history, search_history):
         full_answer = "I couldn’t retrieve that drug summary safely. Please try selecting the drug again."
     label = f"Quick summary: {drug_name}"
     chat_history = list(chat_history or [])
-    chat_history.append({"role": "user",      "content": label})
-    chat_history.append({"role": "assistant", "content": full_answer})
+    # Older Gradio Chatbot expects a list of (user_message, assistant_message) pairs.
+    chat_history.append((label, full_answer))
     search_history = list(search_history or [])
     if label not in search_history:
         search_history.insert(0, label)
@@ -2169,10 +2169,15 @@ def route_and_respond(question, intent, conversation_history=None):
 def respond(message, chat_history, search_history):
     if not message or to_text(message).strip() == "":
         return "", chat_history, search_history, gr.update(), gr.update(), ""
-    conversation_history = [
-        {"role": t.get("role", ""), "content": to_text(t.get("content", ""))}
-        for t in (chat_history or []) if isinstance(t, dict)
-    ]
+    # Support older Hugging Face/Gradio Chatbot format: list of (user, assistant) tuples.
+    # Also tolerate newer message dicts if the app is run locally on a newer Gradio.
+    conversation_history = []
+    for t in (chat_history or []):
+        if isinstance(t, dict):
+            conversation_history.append({"role": t.get("role", ""), "content": to_text(t.get("content", ""))})
+        elif isinstance(t, (list, tuple)) and len(t) >= 2:
+            conversation_history.append({"role": "user", "content": to_text(t[0])})
+            conversation_history.append({"role": "assistant", "content": to_text(t[1])})
     try:
         corrected_message, correction_note = fuzzy_correct_question(message)
         intent = classify_intent(corrected_message, conversation_history)
@@ -2189,8 +2194,8 @@ def respond(message, chat_history, search_history):
         print(f"Assistant error: {type(e).__name__}: {e}")
         full_answer = "I’m sorry — I couldn’t process that request safely. Please rephrase it or mention the medicine name directly."
     chat_history = list(chat_history or [])
-    chat_history.append({"role": "user", "content": to_text(message)})
-    chat_history.append({"role": "assistant", "content": full_answer})
+    # Older Gradio Chatbot expects a list of (user_message, assistant_message) pairs.
+    chat_history.append((to_text(message), full_answer))
     search_history = list(search_history or [])
     if message not in search_history:
         search_history.insert(0, message)
@@ -2273,7 +2278,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
         # ── CENTRE — Chat ─────────────────────────────────────
         with gr.Column(scale=3, min_width=400):
-            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True, type="messages")
+            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True)
             # Drug chips removed
             brief_box = gr.Textbox(
                 label="💡 Key Points",
