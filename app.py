@@ -2166,20 +2166,33 @@ def route_and_respond(question, intent, conversation_history=None):
     return "I’m not sure I understood that request. Please rephrase it as a pharmacy question.", "system", "system"
 
 
+def _normalize_chat_for_messages(chat_history):
+    """Return chat history in Gradio messages format: [{'role': ..., 'content': ...}]."""
+    messages = []
+    for item in list(chat_history or []):
+        if isinstance(item, dict):
+            role = item.get("role", "assistant")
+            if role not in {"user", "assistant", "system"}:
+                role = "assistant"
+            messages.append({"role": role, "content": to_text(item.get("content", ""))})
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            messages.append({"role": "user", "content": to_text(item[0])})
+            messages.append({"role": "assistant", "content": to_text(item[1])})
+    return messages
+
+
+def _conversation_history_from_chat(chat_history):
+    """Use the same message format internally for routing and follow-up context."""
+    return _normalize_chat_for_messages(chat_history)
+
+
 def respond(message, chat_history, search_history):
     if not message or to_text(message).strip() == "":
-        return "", chat_history, search_history, gr.update(), gr.update(), ""
-    # Support older Hugging Face/Gradio Chatbot format: list of (user, assistant) tuples.
-    # Also tolerate newer message dicts if the app is run locally on a newer Gradio.
-    conversation_history = []
-    for t in (chat_history or []):
-        if isinstance(t, dict):
-            conversation_history.append({"role": t.get("role", ""), "content": to_text(t.get("content", ""))})
-        elif isinstance(t, (list, tuple)) and len(t) >= 2:
-            conversation_history.append({"role": "user", "content": to_text(t[0])})
-            conversation_history.append({"role": "assistant", "content": to_text(t[1])})
+        return "", _normalize_chat_for_messages(chat_history), search_history, gr.update(), gr.update(), ""
+
+    conversation_history = _conversation_history_from_chat(chat_history)
     try:
-        corrected_message, correction_note = fuzzy_correct_question(message)
+        corrected_message, correction_note = fuzzy_correct_question(to_text(message))
         intent = classify_intent(corrected_message, conversation_history)
         answer, source, mode = route_and_respond(corrected_message, intent, conversation_history)
         if mode == "system":
@@ -2193,15 +2206,42 @@ def respond(message, chat_history, search_history):
     except Exception as e:
         print(f"Assistant error: {type(e).__name__}: {e}")
         full_answer = "I’m sorry — I couldn’t process that request safely. Please rephrase it or mention the medicine name directly."
-    chat_history = list(chat_history or [])
-    # Older Gradio Chatbot expects a list of (user_message, assistant_message) pairs.
-    chat_history.append((to_text(message), full_answer))
+
+    chat_messages = _normalize_chat_for_messages(chat_history)
+    chat_messages.append({"role": "user", "content": to_text(message)})
+    chat_messages.append({"role": "assistant", "content": full_answer})
+
     search_history = list(search_history or [])
-    if message not in search_history:
-        search_history.insert(0, message)
+    msg_text = to_text(message)
+    if msg_text not in search_history:
+        search_history.insert(0, msg_text)
     search_history = search_history[:15]
-    history_md = "\n".join([f"- {h}" for h in search_history])
-    return "", chat_history, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
+    history_md = "\n".join([f"- {h}" for h in search_history]) or "*No searches yet*"
+    return "", chat_messages, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
+
+
+def drug_summary_respond(drug_name, chat_history, search_history):
+    if not drug_name:
+        return _normalize_chat_for_messages(chat_history), search_history, gr.update(), gr.update(), ""
+    try:
+        answer = format_drug_summary(to_text(drug_name))
+        header = "*📦 Operational data — inventory + batch records*\n\n"
+        full_answer = header + answer
+    except Exception as e:
+        print(f"Drug summary error: {type(e).__name__}: {e}")
+        full_answer = "I couldn’t retrieve that drug summary safely. Please try selecting the drug again."
+
+    label = f"Quick summary: {to_text(drug_name)}"
+    chat_messages = _normalize_chat_for_messages(chat_history)
+    chat_messages.append({"role": "user", "content": label})
+    chat_messages.append({"role": "assistant", "content": full_answer})
+
+    search_history = list(search_history or [])
+    if label not in search_history:
+        search_history.insert(0, label)
+    search_history = search_history[:15]
+    history_md = "\n".join([f"- {h}" for h in search_history]) or "*No searches yet*"
+    return chat_messages, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
 
 
 # ── Featured drugs & quick questions ─────────────────────────
