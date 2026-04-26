@@ -2162,60 +2162,79 @@ def handle_followup_with_memory(question, memory_context, conversation_history):
 
 
 def route_and_respond(question, conversation_history=None):
+    """GPT tool-calling router — intent + parameters from GPT, SQL from Python."""
     question = to_text(question)
     q = qnorm(question)
     conversation_history = conversation_history or []
+
     result = classify_intent_with_tools(question, conversation_history)
     tool   = result["tool"]
     params = result["params"]
-    intent = tool
-    if tool == "greeting" or intent == "greeting":
+
+    # ── System responses ───────────────────────────────────────
+    if tool == "greeting":
         return natural_welcome(question), "system", "system"
-    if intent == "thanks":
+    if tool == "thanks":
         return THANKS_RESPONSE, "system", "system"
-    if intent == "farewell":
+    if tool == "farewell":
         return FAREWELL_RESPONSE, "system", "system"
-    if intent == "out_of_scope":
-        return OUT_OF_SCOPE_RESPONSE, "system", "system"
-    if intent == "unknown":
-        return "I’m not sure I understood that request. Please ask about stock, expiry dates, sales, suppliers, forecasts, or medicine information.", "system", "system"
-    if intent == "followup":
-        return handle_followup(question, conversation_history)
-    if tool in ("stock_price","query_inventory"):
+    if tool == "drug_summary":
+        name = params.get("drug_name", question)
+        return format_drug_summary(name), "inventory + batch records", "operational"
+
+    # ── Operational tool executors ─────────────────────────────
+    if tool == "query_inventory":
         return execute_query_inventory(params), "inventory database", "operational"
-    if intent == "category_browse":
-        return format_category_browse(question), "inventory database", "operational"
-    if tool in ("stats","query_stats"):
-        return format_stats(), "inventory database", "operational"
-    if intent == "low_stock":
-        return format_low_stock(question), "inventory database", "operational"
-    if tool in ("expiry","query_expiry"):
-        return execute_query_expiry(params), "batch records", "operational"
-    if tool in ("sales","query_sales"):
+    if tool == "query_sales":
         return execute_query_sales(params), "transaction records", "operational"
-    if tool in ("supplier","query_supplier"):
+    if tool == "query_expiry":
+        return execute_query_expiry(params), "batch records", "operational"
+    if tool == "query_supplier":
         return execute_query_supplier(params), "supplier knowledge graph", "operational"
-    if tool in ("alternative","query_alternatives"):
-        return format_alternative(params.get("drug_name",question)), "inventory database", "operational"
-    if intent == "briefing":
+    if tool == "query_stats":
+        return format_stats(), "inventory database", "operational"
+    if tool == "query_briefing":
         return format_daily_briefing(), "inventory + batch + transaction records", "operational"
-    if intent == "reorder":
+    if tool == "query_reorder":
         return format_reorder_list(), "inventory + transaction records", "operational"
-    if tool in ("forecast","query_forecast"):
-        if any(x in q for x in ["stock last","days of stock","run out","how long will stock"]):
+    if tool == "query_forecast":
+        if any(x in q for x in ["stock last", "days of stock", "run out", "how long will stock"]):
             return format_stock_depletion_forecast(), "inventory + transaction records", "operational"
         return format_revenue_forecast(), "inventory + transaction records", "operational"
-    if tool in ("reconciliation","query_reconciliation"):
-        drug=params.get("drug_name"); return format_reconciliation(f"reconcile {drug}" if drug else "reconcile"), "inventory + batch + transaction records", "operational"
-    if tool in ("interaction","query_clinical") and params.get("query_type","drug_info")=="interaction":
-        data = query_neo4j_interaction(params.get("drug_name",question))
-        answer = generate_clinical_answer(question, intent, "drug interaction knowledge graph", data, conversation_history)
-        return answer, "drug interaction knowledge graph", "clinical"
-    if tool in ("drug_info","query_clinical"):
-        data = query_neo4j_drug_info(params.get("drug_name",question))
-        answer = generate_clinical_answer(question, intent, "drug knowledge graph", data, conversation_history)
-        return answer, "drug knowledge graph", "clinical"
-    return "I’m not sure I understood that request. Please rephrase it as a pharmacy question.", "system", "system"
+    if tool == "query_reconciliation":
+        drug = params.get("drug_name")
+        q_recon = f"reconcile {drug}" if drug else "reconcile"
+        return format_reconciliation(q_recon), "inventory + batch + transaction records", "operational"
+    if tool == "query_alternatives":
+        return format_alternative(params.get("drug_name", question)), "inventory database", "operational"
+
+    # ── Clinical tool ──────────────────────────────────────────
+    if tool == "query_clinical":
+        drug_name  = params.get("drug_name", "")
+        drug_name2 = params.get("drug_name_2")
+        query_type = params.get("query_type", "drug_info")
+        if query_type == "interaction":
+            if drug_name2:
+                data = format_multi_interaction(f"{drug_name} {drug_name2}")
+                if not data:
+                    data = query_neo4j_interaction(drug_name)
+            else:
+                data = query_neo4j_interaction(drug_name)
+            answer = generate_clinical_answer(question, "interaction", "drug interaction knowledge graph", data, conversation_history)
+            return answer, "drug interaction knowledge graph", "clinical"
+        else:
+            data   = query_neo4j_drug_info(drug_name)
+            answer = generate_clinical_answer(question, "drug_info", "drug knowledge graph", data, conversation_history)
+            return answer, "drug knowledge graph", "clinical"
+
+    # ── Out of scope / unknown ─────────────────────────────────
+    if is_out_of_scope(question):
+        return OUT_OF_SCOPE_RESPONSE, "system", "system"
+
+    # ── Default fallback — treat as drug info ──────────────────
+    data   = query_neo4j_drug_info(question)
+    answer = generate_clinical_answer(question, "drug_info", "drug knowledge graph", data, conversation_history)
+    return answer, "drug knowledge graph", "clinical"
 
 
 def export_chat(chat_history):
@@ -2249,14 +2268,17 @@ def filter_drugs(search_text):
 # ── Core respond function ─────────────────────────────────────
 def respond(message, chat_history, search_history, memory_context=None):
     msg_text = to_text(message).strip()
-    chat_messages = _normalize_chat_for_messages(chat_history)
+    # Keep chat_history in original tuple format for Gradio display
+    # Use _normalize only for internal conversation history (GPT context)
+    chat_messages = list(chat_history or [])
     mem = _safe_memory(memory_context)
 
     if not msg_text:
         history_md = "\n".join([f"- {h}" for h in list(search_history or [])]) or "*No searches yet*"
-        return "", chat_messages, list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
+        return "", chat_history or [], list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
 
-    conversation_history = _conversation_history_from_chat(chat_messages)
+    # Convert tuple history to dict format for GPT context
+    conversation_history = _normalize_chat_for_messages(chat_messages)
     corrected_message = msg_text
     correction_note = ""
     answer = ""
@@ -2271,7 +2293,7 @@ def respond(message, chat_history, search_history, memory_context=None):
             answer, source, mode, intent = handle_followup_with_memory(corrected_message, mem, conversation_history)
         else:
             answer, source, mode = route_and_respond(corrected_message, conversation_history)
-            intent = source  # use source as proxy for memory tracking
+            intent = mode  # operational/clinical/system for memory tracking
 
         full_answer = _format_full_answer(answer, source, mode, correction_note)
         mem = _remember_after_turn(mem, corrected_message, intent, answer, source)
@@ -2282,8 +2304,8 @@ def respond(message, chat_history, search_history, memory_context=None):
         full_answer = "I’m sorry — I couldn’t process that request safely. Please rephrase it or mention the medicine name directly."
         # Keep prior memory instead of corrupting it.
 
-    chat_messages.append({"role": "user", "content": msg_text})
-    chat_messages.append({"role": "assistant", "content": full_answer})
+    # Gradio without type="messages" needs [user, assistant] tuples
+    chat_messages.append([msg_text, full_answer])
 
     search_history = list(search_history or [])
     if msg_text and msg_text not in search_history:
@@ -2312,8 +2334,7 @@ def drug_summary_respond(drug_name, chat_history, search_history, memory_context
         drug = to_text(drug_name)
 
     label = f"Quick summary: {drug}"
-    chat_messages.append({"role": "user", "content": label})
-    chat_messages.append({"role": "assistant", "content": full_answer})
+    chat_messages.append([label, full_answer])
 
     search_history = list(search_history or [])
     if label not in search_history:
