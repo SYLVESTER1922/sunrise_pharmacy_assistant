@@ -421,6 +421,8 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         "For 'top N by units sold', use query_sales with sort_by=units. "
         "For follow-up questions referencing 'it', 'them', 'those', 'tell me more', "
         "'what about X', 'and Y' — use the same tool as the previous response context. "
+        "For 'what about [city]?' or 'and [city]?' or '[city]?' after a supplier query — use query_supplier with city=[city]. "
+        "Short location names like 'Harare', 'Bulawayo', 'Mutare' after a supplier question are city filters. "
         "For questions completely unrelated to pharmacy (weather, sports, politics, personal) "
         "do NOT call any tool — respond with no tool_call."
     )
@@ -554,6 +556,11 @@ def execute_query_inventory(params: dict) -> str:
         ]
         return header + "\n".join(rows)
 
+    if drug_name:
+        # Prefer exact name match to avoid e.g. "paracetamol" → "Codeine/Paracetamol"
+        exact = df[df['generic_name'].str.lower() == drug_name.lower()]
+        if not exact.empty:
+            df = exact.reset_index(drop=True)
     if drug_name and len(df) == 1:
         r = df.iloc[0]
         flag = "⚠️ LOW STOCK" if r['quantity_in_stock'] <= r['reorder_level'] else "✅ In Stock"
@@ -579,9 +586,16 @@ def execute_query_inventory(params: dict) -> str:
         ]
         return header + "\n".join(rows)
 
-    # Ranking (cheapest / most expensive / all)
-    label = "cheapest" if filt == "cheapest" else ("most expensive" if filt == "most_expensive" else "matching")
-    header = f"**Top {limit} {label} drugs:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
+    # Ranking (cheapest / most expensive / search results)
+    if filt == "cheapest":
+        label = f"Cheapest {limit} drugs in stock"
+    elif filt == "most_expensive":
+        label = f"Most expensive {limit} drugs"
+    elif drug_name:
+        label = f"Drugs matching '{drug_name}'"
+    else:
+        label = f"Top {limit} drugs"
+    header = f"**{label}:**\n\n| Drug | Brand | Price | Stock | Shelf |\n|---|---|---|---|---|\n"
     rows = [
         f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | {r['quantity_in_stock']} | {r['shelf_location']} |"
         for _, r in df.iterrows()
@@ -724,24 +738,49 @@ def _sales_last_week() -> str:
 def _sales_day_of_week(day_name: str) -> str:
     day_map = {"monday":1,"tuesday":2,"wednesday":3,"thursday":4,"friday":5,"saturday":6,"sunday":0}
     day_num = day_map.get(day_name.lower(), 6)
-    df = pd.read_sql_query("""
+    # Summary totals across all recorded Fridays/Saturdays/etc.
+    df_summary = pd.read_sql_query("""
+        SELECT
+            COUNT(DISTINCT t.date::date)             AS num_days,
+            COUNT(*)                                  AS total_transactions,
+            SUM(t.quantity_sold)                      AS total_units,
+            ROUND(SUM(t.total_amount)::numeric, 2)    AS total_revenue,
+            ROUND(AVG(daily_rev.rev)::numeric, 2)     AS avg_daily_revenue
+        FROM transactions t
+        JOIN (
+            SELECT date::date AS d, SUM(total_amount) AS rev
+            FROM transactions
+            WHERE EXTRACT(DOW FROM date::date) = %(dow)s
+            GROUP BY date::date
+        ) daily_rev ON t.date::date = daily_rev.d
+        WHERE EXTRACT(DOW FROM t.date::date) = %(dow)s
+    """, get_engine(), params={"dow": day_num})
+    df_drugs = pd.read_sql_query("""
         SELECT i.brand_name, i.generic_name,
-               SUM(t.quantity_sold) AS total_units,
-               ROUND(SUM(t.total_amount)::numeric, 2) AS total_revenue
+               SUM(t.quantity_sold)                   AS total_units,
+               ROUND(SUM(t.total_amount)::numeric, 2) AS total_revenue,
+               COUNT(*)                               AS transactions
         FROM transactions t JOIN inventory i ON t.product_id = i.product_id
-        WHERE EXTRACT(DOW FROM t.date::date) = %s
+        WHERE EXTRACT(DOW FROM t.date::date) = %(dow)s
         GROUP BY i.brand_name, i.generic_name
-        ORDER BY total_units DESC LIMIT 10
-    """, get_engine(), params=(day_num,))
-    if df.empty:
+        ORDER BY total_units DESC
+        LIMIT 10
+    """, get_engine(), params={"dow": day_num})
+    if df_drugs.empty:
         return f"No sales data found for {day_name.capitalize()}s."
-    header  = f"**Top selling drugs on {day_name.capitalize()}s:**\n\n"
-    header += "| Rank | Brand | Generic | Units | Revenue |\n|---|---|---|---|---|\n"
-    rows = [
-        f"| {i+1} | {r['brand_name']} | {r['generic_name']} | {r['total_units']} | ${r['total_revenue']:,.2f} |"
-        for i, (_, r) in enumerate(df.iterrows())
-    ]
-    return header + "\n".join(rows)
+    s = df_summary.iloc[0]
+    out  = f"**{day_name.capitalize()} Sales Summary** (across {s['num_days']} recorded {day_name.capitalize()}s)\n\n"
+    out += f"Total Transactions: **{s['total_transactions']}** | "
+    out += f"Total Units: **{s['total_units']}** | "
+    out += f"Total Revenue: **${s['total_revenue']:,.2f}** | "
+    out += f"Avg per {day_name.capitalize()}: **${s['avg_daily_revenue']:,.2f}**\n\n"
+    out += f"**Drug Breakdown:**\n\n"
+    out += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n|---|---|---|---|---|---|\n"
+    out += "\n".join(
+        f"| {i+1} | {r['brand_name']} | {r['generic_name']} | {r['total_units']} | ${r['total_revenue']:,.2f} | {r['transactions']} |"
+        for i, (_, r) in enumerate(df_drugs.iterrows())
+    )
+    return out
 
 
 def execute_query_expiry(params: dict) -> str:
@@ -1745,10 +1784,17 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             last_response = ""
             for entry in reversed(chat_history):
                 if isinstance(entry, dict) and entry.get("role") == "assistant":
-                    last_response = entry.get("content", "")
+                    content = entry.get("content", "")
+                    # Gradio can store content as a list of blocks — flatten to str
+                    if isinstance(content, list):
+                        content = " ".join(
+                            c.get("text", "") if isinstance(c, dict) else str(c)
+                            for c in content
+                        )
+                    last_response = str(content)
                     break
                 elif isinstance(entry, (list, tuple)) and len(entry) > 1:
-                    last_response = entry[1] or ""
+                    last_response = str(entry[1] or "")
                     break
             if not last_response:
                 return "No response yet — ask a question first."
