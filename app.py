@@ -2166,73 +2166,259 @@ def route_and_respond(question, intent, conversation_history=None):
     return "I’m not sure I understood that request. Please rephrase it as a pharmacy question.", "system", "system"
 
 
+
 def _normalize_chat_for_messages(chat_history):
-    """Return chat history in Gradio messages format: [{'role': ..., 'content': ...}]."""
+    """Return clean Gradio message-format history and remove blank turns."""
     messages = []
     for item in list(chat_history or []):
+        if item is None:
+            continue
         if isinstance(item, dict):
             role = item.get("role", "assistant")
             if role not in {"user", "assistant", "system"}:
                 role = "assistant"
-            messages.append({"role": role, "content": to_text(item.get("content", ""))})
+            content = to_text(item.get("content", "")).strip()
+            if content:
+                messages.append({"role": role, "content": content})
         elif isinstance(item, (list, tuple)) and len(item) >= 2:
-            messages.append({"role": "user", "content": to_text(item[0])})
-            messages.append({"role": "assistant", "content": to_text(item[1])})
+            user_text = to_text(item[0]).strip()
+            assistant_text = to_text(item[1]).strip()
+            if user_text:
+                messages.append({"role": "user", "content": user_text})
+            if assistant_text:
+                messages.append({"role": "assistant", "content": assistant_text})
+        else:
+            content = to_text(item).strip()
+            if content:
+                messages.append({"role": "assistant", "content": content})
     return messages
 
 
 def _conversation_history_from_chat(chat_history):
-    """Use the same message format internally for routing and follow-up context."""
     return _normalize_chat_for_messages(chat_history)
 
 
-def respond(message, chat_history, search_history):
-    if not message or to_text(message).strip() == "":
-        return "", _normalize_chat_for_messages(chat_history), search_history, gr.update(), gr.update(), ""
+def _safe_memory(memory_context):
+    """Normalize the explicit conversation memory state used for follow-ups."""
+    if not isinstance(memory_context, dict):
+        memory_context = {}
+    return {
+        "last_intent": to_text(memory_context.get("last_intent", "")),
+        "last_drug": to_text(memory_context.get("last_drug", "")),
+        "last_day": to_text(memory_context.get("last_day", "")),
+        "last_topic": to_text(memory_context.get("last_topic", "")),
+        "last_question": to_text(memory_context.get("last_question", "")),
+    }
 
-    conversation_history = _conversation_history_from_chat(chat_history)
-    try:
-        corrected_message, correction_note = fuzzy_correct_question(to_text(message))
-        intent = classify_intent(corrected_message, conversation_history)
-        answer, source, mode = route_and_respond(corrected_message, intent, conversation_history)
-        if mode == "system":
-            full_answer = answer
-        elif mode == "operational":
-            header = f"*📦 Operational data — {source}*\n\n"
-            full_answer = f"{correction_note}\n\n{header}{answer}" if correction_note else f"{header}{answer}"
-        else:
-            header = f"*🧪 Clinical data — {source}*\n\n"
-            full_answer = f"{correction_note}\n\n{header}{answer}" if correction_note else f"{header}{answer}"
-    except Exception as e:
-        print(f"Assistant error: {type(e).__name__}: {e}")
-        full_answer = "I’m sorry — I couldn’t process that request safely. Please rephrase it or mention the medicine name directly."
 
+def _day_in_text(text):
+    q = qnorm(text)
+    for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+        if day in q:
+            return day
+    return ""
+
+
+def _is_followup_question(question, memory_context):
+    q = qnorm(question)
+    mem = _safe_memory(memory_context)
+    if not mem.get("last_intent"):
+        return False
+    if any(x in q for x in [
+        "what about", "how about", "and ", "tell me more", "explain further",
+        "more about", "elaborate", "this", "that", "these", "those",
+        "of these", "of those", "same list", "only top", "i meant"
+    ]):
+        return True
+    # Very short day follow-ups such as "Friday?" after sales.
+    if mem.get("last_intent") == "sales" and _day_in_text(q) and len(q.split()) <= 4:
+        return True
+    return False
+
+
+def _remember_after_turn(memory_context, question, intent, answer, source):
+    mem = _safe_memory(memory_context)
+    q = qnorm(question)
+    drug = resolve_drug_name(question) or mem.get("last_drug", "")
+    day = _day_in_text(question) or mem.get("last_day", "")
+
+    normalized_intent = intent
+    if intent in {"low_stock", "reorder", "stats"}:
+        normalized_intent = "stock_price"
+    if intent == "briefing":
+        normalized_intent = "briefing"
+    if intent == "forecast":
+        normalized_intent = "forecast"
+
+    # Use source/answer as a safety net when the intent was unknown or follow-up.
+    source_text = qnorm(source + " " + answer[:300])
+    if intent in {"followup", "unknown"}:
+        if "batch" in source_text or "expiry" in source_text or "expires" in source_text:
+            normalized_intent = "expiry"
+        elif "transaction" in source_text or "sales" in source_text or "selling" in source_text:
+            normalized_intent = "sales"
+        elif "supplier" in source_text or "lead time" in source_text:
+            normalized_intent = "supplier"
+        elif "interaction" in source_text:
+            normalized_intent = "interaction"
+        elif "inventory" in source_text or "stock" in source_text:
+            normalized_intent = "stock_price"
+        elif "drug knowledge" in source_text:
+            normalized_intent = "drug_info"
+
+    # If user asked a clinical interaction, keep the main drug for "tell me more".
+    if normalized_intent == "interaction" and not drug:
+        drug = mem.get("last_drug", "")
+
+    return {
+        "last_intent": to_text(normalized_intent),
+        "last_drug": to_text(drug),
+        "last_day": to_text(day),
+        "last_topic": to_text(source),
+        "last_question": to_text(question),
+    }
+
+
+def handle_followup_with_memory(question, memory_context, conversation_history):
+    """Deterministic follow-up handler independent of Gradio chatbot internals."""
+    q = qnorm(question)
+    mem = _safe_memory(memory_context)
+    last_intent = mem.get("last_intent")
+    last_drug = mem.get("last_drug")
+
+    # Day-of-week follow-ups: "And Friday?"
+    day = _day_in_text(question)
+    if day and (last_intent == "sales" or q.startswith("and") or q.endswith("?")):
+        return format_sales(day), "transaction records", "operational", "sales"
+
+    # "top 3 of these" should reuse the previous result type.
+    nums = re.findall(r"\b(\d+)\b", q)
+    n = nums[0] if nums else "3"
+    if any(x in q for x in ["of these", "of those", "same list", "only top", "i meant"]):
+        if last_intent == "expiry" or "expir" in q:
+            return format_expiry(f"show next {n} expiries"), "batch records", "operational", "expiry"
+        if last_intent == "sales":
+            return format_sales(f"top {n} selling drugs"), "transaction records", "operational", "sales"
+        if last_intent == "stock_price":
+            return format_low_stock(f"top {n}"), "inventory database", "operational", "stock_price"
+
+    # "What about X?" follows the prior domain if possible; otherwise stock is safest.
+    if any(x in q for x in ["what about", "how about", "and "]):
+        drug = resolve_drug_name(question) or last_drug
+        if not drug:
+            return "I’m not sure which medicine you mean. Please name the drug directly.", "system", "system", last_intent or "unknown"
+        if last_intent == "expiry":
+            return format_expiry(f"when does {drug} expire"), "batch records", "operational", "expiry"
+        if last_intent == "supplier":
+            return format_supplier(f"who supplies {drug}"), "supplier knowledge graph", "operational", "supplier"
+        if last_intent == "interaction":
+            data = query_neo4j_interaction(drug)
+            answer = generate_clinical_answer(f"What interactions involve {drug}?", "interaction", "drug interaction knowledge graph", data, conversation_history)
+            return answer, "drug interaction knowledge graph", "clinical", "interaction"
+        if last_intent == "drug_info":
+            data = query_neo4j_drug_info(drug)
+            answer = generate_clinical_answer(f"Tell me about {drug}", "drug_info", "drug knowledge graph", data, conversation_history)
+            return answer, "drug knowledge graph", "clinical", "drug_info"
+        return format_stock_price(f"check stock for {drug}"), "inventory database", "operational", "stock_price"
+
+    # "Tell me more" / "explain further".
+    if any(x in q for x in ["tell me more", "explain further", "more about", "elaborate", "this", "that"]):
+        drug = resolve_drug_name(question) or last_drug
+        if last_intent == "interaction" and drug:
+            data = query_neo4j_interaction(drug)
+            answer = generate_clinical_answer(
+                f"Explain the interaction details, severity, and monitoring recommendations for {drug}",
+                "interaction",
+                "drug interaction knowledge graph",
+                data,
+                conversation_history,
+            )
+            return answer, "drug interaction knowledge graph", "clinical", "interaction"
+        if drug:
+            data = query_neo4j_drug_info(drug)
+            answer = generate_clinical_answer(f"Tell me more about {drug}", "drug_info", "drug knowledge graph", data, conversation_history)
+            return answer, "drug knowledge graph", "clinical", "drug_info"
+        return "I can explain further if you mention the medicine or topic you mean.", "system", "system", last_intent or "unknown"
+
+    return "I’m not sure what you want me to continue from. Please rephrase or name the medicine directly.", "system", "system", last_intent or "unknown"
+
+
+def _format_full_answer(answer, source, mode, correction_note=""):
+    if mode == "system":
+        return answer
+    if mode == "operational":
+        header = f"*📦 Operational data — {source}*\n\n"
+    else:
+        header = f"*🧪 Clinical data — {source}*\n\n"
+    return f"{correction_note}\n\n{header}{answer}" if correction_note else f"{header}{answer}"
+
+
+def respond(message, chat_history, search_history, memory_context=None):
+    msg_text = to_text(message).strip()
     chat_messages = _normalize_chat_for_messages(chat_history)
-    chat_messages.append({"role": "user", "content": to_text(message)})
+    mem = _safe_memory(memory_context)
+
+    if not msg_text:
+        history_md = "\n".join([f"- {h}" for h in list(search_history or [])]) or "*No searches yet*"
+        return "", chat_messages, list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
+
+    conversation_history = _conversation_history_from_chat(chat_messages)
+    corrected_message = msg_text
+    correction_note = ""
+    answer = ""
+    source = "system"
+    mode = "system"
+    intent = "unknown"
+
+    try:
+        corrected_message, correction_note = fuzzy_correct_question(msg_text)
+
+        if _is_followup_question(corrected_message, mem):
+            answer, source, mode, intent = handle_followup_with_memory(corrected_message, mem, conversation_history)
+        else:
+            # Do not let old chatbot internals decide follow-up; explicit memory handles that.
+            intent = classify_intent(corrected_message, [])
+            answer, source, mode = route_and_respond(corrected_message, intent, [])
+
+        full_answer = _format_full_answer(answer, source, mode, correction_note)
+        mem = _remember_after_turn(mem, corrected_message, intent, answer, source)
+
+    except Exception as e:
+        import traceback
+        print("Assistant error:\n" + traceback.format_exc())
+        full_answer = "I’m sorry — I couldn’t process that request safely. Please rephrase it or mention the medicine name directly."
+        # Keep prior memory instead of corrupting it.
+
+    chat_messages.append({"role": "user", "content": msg_text})
     chat_messages.append({"role": "assistant", "content": full_answer})
 
     search_history = list(search_history or [])
-    msg_text = to_text(message)
-    if msg_text not in search_history:
+    if msg_text and msg_text not in search_history:
         search_history.insert(0, msg_text)
     search_history = search_history[:15]
     history_md = "\n".join([f"- {h}" for h in search_history]) or "*No searches yet*"
-    return "", chat_messages, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
+
+    return "", chat_messages, search_history, mem, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
 
 
-def drug_summary_respond(drug_name, chat_history, search_history):
-    if not drug_name:
-        return _normalize_chat_for_messages(chat_history), search_history, gr.update(), gr.update(), ""
-    try:
-        answer = format_drug_summary(to_text(drug_name))
-        header = "*📦 Operational data — inventory + batch records*\n\n"
-        full_answer = header + answer
-    except Exception as e:
-        print(f"Drug summary error: {type(e).__name__}: {e}")
-        full_answer = "I couldn’t retrieve that drug summary safely. Please try selecting the drug again."
-
-    label = f"Quick summary: {to_text(drug_name)}"
+def drug_summary_respond(drug_name, chat_history, search_history, memory_context=None):
+    mem = _safe_memory(memory_context)
     chat_messages = _normalize_chat_for_messages(chat_history)
+    if not drug_name:
+        history_md = "\n".join([f"- {h}" for h in list(search_history or [])]) or "*No searches yet*"
+        return chat_messages, list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
+    try:
+        drug = to_text(drug_name)
+        answer = format_drug_summary(drug)
+        full_answer = "*📦 Operational data — inventory + batch records*\n\n" + answer
+        mem = _remember_after_turn(mem, f"Quick summary: {drug}", "stock_price", answer, "inventory + batch records")
+    except Exception:
+        import traceback
+        print("Drug summary error:\n" + traceback.format_exc())
+        full_answer = "I couldn’t retrieve that drug summary safely. Please try selecting the drug again."
+        drug = to_text(drug_name)
+
+    label = f"Quick summary: {drug}"
     chat_messages.append({"role": "user", "content": label})
     chat_messages.append({"role": "assistant", "content": full_answer})
 
@@ -2241,7 +2427,27 @@ def drug_summary_respond(drug_name, chat_history, search_history):
         search_history.insert(0, label)
     search_history = search_history[:15]
     history_md = "\n".join([f"- {h}" for h in search_history]) or "*No searches yet*"
-    return chat_messages, search_history, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
+    return chat_messages, search_history, mem, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
+
+
+def click_quick_question(question, chat_history, search_history, memory_context=None):
+    return respond(question, chat_history, search_history, memory_context)
+
+
+def reask_from_history(selected_question, chat_history, search_history, memory_context=None):
+    if not selected_question:
+        mem = _safe_memory(memory_context)
+        history_md = "\n".join([f"- {h}" for h in list(search_history or [])]) or "*No searches yet*"
+        return "", _normalize_chat_for_messages(chat_history), list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
+    return respond(selected_question, chat_history, search_history, memory_context)
+
+
+def filter_drugs(search_text):
+    search_text = to_text(search_text).strip()
+    if not search_text or len(search_text) < 2:
+        return gr.update(choices=DRUG_NAMES[:20])
+    matches = [d for d in DRUG_NAMES if search_text.lower() in to_text(d).lower()][:20]
+    return gr.update(choices=matches if matches else DRUG_NAMES[:20])
 
 
 # ── Featured drugs & quick questions ─────────────────────────
@@ -2368,49 +2574,51 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     """)
 
     search_history_state = gr.State([])
+    memory_state = gr.State({})
 
     submit.click(respond,
-        [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+        [msg, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
     msg.submit(respond,
-        [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+        [msg, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
 
-    def transcribe_audio(audio_path, chat_history, search_history):
+    def transcribe_audio(audio_path, chat_history, search_history, memory_context):
         if not audio_path:
-            return "", chat_history, search_history, gr.update(), gr.update(), gr.update(value=None), ""
+            return "", _normalize_chat_for_messages(chat_history), search_history, _safe_memory(memory_context), gr.update(), gr.update(), gr.update(value=None), ""
         try:
             with open(audio_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1", file=f
                 )
             transcribed = transcript.text
-            result = respond(transcribed, chat_history, search_history)
-            # result is (msg, chat, search, dropdown, history_md, brief)
-            # Add audio reset at end
-            return result[0], result[1], result[2], result[3], result[4], gr.update(value=None), result[5]
-        except Exception as e:
-            return "", chat_history, search_history, gr.update(), gr.update(), gr.update(value=None), ""
+            result = respond(transcribed, chat_history, search_history, memory_context)
+            # respond returns (msg, chat, search, memory, dropdown, history_md, brief)
+            return result[0], result[1], result[2], result[3], result[4], result[5], gr.update(value=None), result[6]
+        except Exception:
+            import traceback
+            print("Audio transcription error:\n" + traceback.format_exc())
+            return "", _normalize_chat_for_messages(chat_history), search_history, _safe_memory(memory_context), gr.update(), gr.update(), gr.update(value=None), ""
 
     audio_input.stop_recording(transcribe_audio,
-        [audio_input, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_input, brief_box])
+        [audio_input, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, audio_input, brief_box])
 
     history_dropdown.change(reask_from_history,
-        [history_dropdown, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+        [history_dropdown, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
 
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
         btn.click(click_quick_question,
-            [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
-            [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+            [gr.Textbox(value=question, visible=False), chatbot, search_history_state, memory_state],
+            [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
 
     # Drug chips removed
 
     drug_search.change(filter_drugs, [drug_search], [drug_dropdown])
     drug_lookup_btn.click(drug_summary_respond,
-        [drug_dropdown, chatbot, search_history_state],
-        [chatbot, search_history_state, history_dropdown, history_display, brief_box],
+        [drug_dropdown, chatbot, search_history_state, memory_state],
+        [chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box],
         scroll_to_output=True)
 
     def do_export(chat_history):
