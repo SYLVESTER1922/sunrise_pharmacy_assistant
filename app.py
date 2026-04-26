@@ -26,7 +26,7 @@ GREETING_TRIGGERS = {
 THANKS_TRIGGERS = {
     "thank you", "thanks", "thank", "cheers", "appreciated",
     "great", "ok", "okay", "cool", "perfect", "noted",
-    "awesome", "brilliant", "good", "nice", "wonderful",
+    "awesome", "brilliant", "nice", "wonderful",
     "excellent", "got it", "understood", "sure"
 }
 
@@ -131,11 +131,16 @@ DRUG_NAMES = DRUGS_DF["generic_name"].tolist()
 
 def fuzzy_match_drug(text, threshold=78):
     text = re.sub(r"['\u2019\u2018`]", "", text.lower().strip())
+    # Exact match wins immediately — never correct e.g. "paracetamol" → "Codeine/Paracetamol"
+    for drug in DRUG_NAMES:
+        if text == drug.lower():
+            return drug
     best_score = 0
     best_match = None
     for drug in DRUG_NAMES:
         drug_lower = drug.lower()
-        if text in drug_lower or drug_lower in text:
+        # Only substring-match if the query is a meaningful substring (not a component)
+        if drug_lower == text:
             return drug
         score = SequenceMatcher(None, text, drug_lower).ratio() * 100
         if score > best_score:
@@ -1306,16 +1311,27 @@ def _cat_hour() -> int:
     return datetime.now(tz=timezone(timedelta(hours=2))).hour
 
 
-def get_greeting_response() -> str:
-    hour = _cat_hour()
-    if hour < 12:
-        tod = "Good morning"
-    elif hour < 17:
-        tod = "Good afternoon"
-    else:
-        tod = "Good evening"
+def get_greeting_response(question: str = "") -> str:
+    q = question.lower().strip().rstrip("!.,?")
+    # Map common greetings to a natural echo
+    echo_map = {
+        "good morning": "Good morning",
+        "morning":      "Good morning",
+        "good afternoon": "Good afternoon",
+        "afternoon":    "Good afternoon",
+        "good evening": "Good evening",
+        "evening":      "Good evening",
+        "good night":   "Good night",
+        "hi":  "Hi",
+        "hey": "Hey",
+        "hello": "Hello",
+        "howzit": "Howzit",
+        "yo":  "Hey",
+        "sup": "Hey",
+    }
+    opener = next((v for k, v in echo_map.items() if q.startswith(k)), "Hello")
     return (
-        f"{tod}! I'm your Sunrise Pharmacy Assistant. "
+        f"{opener}! I'm your Sunrise Pharmacy Assistant. "
         "Ask me about stock levels, expiry dates, sales, suppliers, or drug interactions — "
         "whatever you need. How can I help?"
     )
@@ -1357,7 +1373,7 @@ def route_and_respond(question: str, conversation_history=None):
 
     # ── System responses ────────────────────────────────────────────
     if tool == "greeting":
-        return get_greeting_response(), "", "system"
+        return get_greeting_response(question), "", "system"
     if tool == "thanks":
         return THANKS_RESPONSE, "", "system"
     if tool == "farewell":
@@ -1725,11 +1741,17 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         if not chat_history:
             return "No response yet — ask a question first."
         try:
-            last = chat_history[-1]
-            last_response = (
-                last.get("content", "") if isinstance(last, dict)
-                else (last[1] if isinstance(last, (list, tuple)) and len(last) > 1 else str(last))
-            )
+            # Find the last assistant message regardless of format
+            last_response = ""
+            for entry in reversed(chat_history):
+                if isinstance(entry, dict) and entry.get("role") == "assistant":
+                    last_response = entry.get("content", "")
+                    break
+                elif isinstance(entry, (list, tuple)) and len(entry) > 1:
+                    last_response = entry[1] or ""
+                    break
+            if not last_response:
+                return "No response yet — ask a question first."
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{
