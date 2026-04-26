@@ -121,8 +121,14 @@ def get_all_drugs():
     )
     return df
 
-DRUGS_DF   = get_all_drugs()
-DRUG_NAMES = DRUGS_DF["generic_name"].tolist()
+DRUGS_DF    = get_all_drugs()
+DRUG_NAMES  = DRUGS_DF["generic_name"].tolist()
+BRAND_NAMES = DRUGS_DF["brand_name"].tolist()
+# Map brand name → generic name for acronym/brand lookups (e.g. ORS → Oral Rehydration Salts)
+BRAND_TO_GENERIC = dict(zip(
+    DRUGS_DF["brand_name"].str.lower(),
+    DRUGS_DF["generic_name"]
+))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -131,21 +137,27 @@ DRUG_NAMES = DRUGS_DF["generic_name"].tolist()
 
 def fuzzy_match_drug(text, threshold=78):
     text = re.sub(r"['\u2019\u2018`]", "", text.lower().strip())
-    # Exact match wins immediately — never correct e.g. "paracetamol" → "Codeine/Paracetamol"
+    # 1. Exact generic name match
     for drug in DRUG_NAMES:
         if text == drug.lower():
             return drug
+    # 2. Exact brand name match → return generic (handles ORS, TLD, Moxil etc)
+    if text in BRAND_TO_GENERIC:
+        return BRAND_TO_GENERIC[text]
+    # 3. Fuzzy on generic names
     best_score = 0
     best_match = None
     for drug in DRUG_NAMES:
-        drug_lower = drug.lower()
-        # Only substring-match if the query is a meaningful substring (not a component)
-        if drug_lower == text:
-            return drug
-        score = SequenceMatcher(None, text, drug_lower).ratio() * 100
+        score = SequenceMatcher(None, text, drug.lower()).ratio() * 100
         if score > best_score:
             best_score = score
             best_match = drug
+    # 4. Fuzzy on brand names
+    for brand, generic in BRAND_TO_GENERIC.items():
+        score = SequenceMatcher(None, text, brand).ratio() * 100
+        if score > best_score:
+            best_score = score
+            best_match = generic
     return best_match if best_score >= threshold else None
 
 
@@ -224,9 +236,10 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "query_sales",
             "description": (
-                "Query sales transactions — top/bottom sellers, revenue, day analysis. "
-                "Use direction=bottom and sort_by=units for: 'least selling', 'worst sellers', "
-                "'lowest units sold'. Use sort_by=units for 'top by units sold'."
+                "Query sales transactions — top/bottom sellers, revenue, day analysis, total units sold, total transactions. "
+                "Use direction=bottom and sort_by=units for: 'least selling', 'worst sellers', 'lowest units sold'. "
+                "Use sort_by=units for 'top by units sold'. "
+                "Use period=all_time for: 'how many units did we sell', 'total units sold', 'how many transactions', 'total sales'."
             ),
             "parameters": {
                 "type": "object",
@@ -236,7 +249,7 @@ TOOLS_SCHEMA = [
                     "period":      {
                         "type": "string",
                         "enum": ["all_time", "last_day", "last_week", "day_of_week", "customer_type"],
-                        "description": "Time period. Use all_time for general top/bottom queries. Use last_week only when user explicitly says 'last week'."
+                        "description": "Time period. Use all_time for general top/bottom queries. Use last_week only when user explicitly says 'last week' OR 'this month' (best available). Use last_day for: 'yesterday revenue', 'yesterday sales', 'how much did we make yesterday', 'last day sales', 'how many transactions yesterday'."
                     },
                     "day_name":    {"type": "string",  "description": "Day name e.g. Saturday, only for day_of_week period"},
                     "limit":       {"type": "integer", "description": "Number of results, default 10"}
@@ -250,9 +263,9 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "query_expiry",
             "description": (
-                "Query batch expiry records — upcoming expiries, specific drug batches, batch count. "
+                "Query batch expiry records — upcoming expiries, specific drug batches, batch count, month filter. "
                 "Use for: 'how many batches of X', 'when does X expire', 'batches expiring soon', "
-                "'what expires first', 'nearest expiry'."
+                "'what expires first', 'nearest expiry', 'expiring in May', 'which drugs have more than N batches'."
             ),
             "parameters": {
                 "type": "object",
@@ -260,7 +273,10 @@ TOOLS_SCHEMA = [
                     "drug_name":    {"type": "string",  "description": "Specific drug name, or null for all"},
                     "within_days":  {"type": "integer", "description": "Show batches expiring within N days, default 90"},
                     "limit":        {"type": "integer", "description": "Number of results, default 10"},
-                    "top_only":     {"type": "boolean", "description": "If true, return only the single soonest-expiring batch"}
+                    "top_only":     {"type": "boolean", "description": "If true, return only the single soonest-expiring batch"},
+                    "month_name":   {"type": "string",  "description": "Month name e.g. May, June — for named month expiry filter"},
+                    "count_only":   {"type": "boolean", "description": "If true, return batch count per drug"},
+                    "min_batches":  {"type": "integer", "description": "Minimum batch count filter when count_only=true"}
                 },
                 "required": []
             }
@@ -271,8 +287,9 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "query_supplier",
             "description": (
-                "Query supplier information — who supplies a drug, lead times, city breakdown. "
-                "Triggered by: supplier, vendor, distributor, buy from, order from, who supplies, source."
+                "Query supplier information — who supplies a drug, lead times, city breakdown, supplier count. "
+                "Triggered by: supplier, vendor, distributor, buy from, order from, who supplies, source, "
+                "'how many suppliers', 'fastest vendor', 'fastest supplier', 'quickest lead time'."
             ),
             "parameters": {
                 "type": "object",
@@ -322,7 +339,15 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "query_briefing",
-            "description": "Generate a daily briefing summary — low stock + urgent expiry + yesterday revenue. Triggered by: daily briefing, morning briefing, daily summary, start of day.",
+            "description": "Generate a FULL daily briefing — low stock alerts + urgent expiry + yesterday revenue combined. ONLY trigger for: 'daily briefing', 'morning briefing', 'daily summary', 'start of day', 'briefing', 'anything I should know', 'stock situation'. Do NOT use for 'yesterday revenue' or 'yesterday sales' alone — use query_sales with period=last_day for those.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_combined_risk",
+            "description": "Find drugs that are BOTH low on stock AND expiring soon. Use for: 'low stock and expiring', 'running out and expiring', 'critical drugs', 'what needs urgent attention'.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -423,6 +448,11 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         "'what about X', 'and Y' — use the same tool as the previous response context. "
         "For 'what about [city]?' or 'and [city]?' or '[city]?' after a supplier query — use query_supplier with city=[city]. "
         "Short location names like 'Harare', 'Bulawayo', 'Mutare' after a supplier question are city filters. "
+        "For 'fastest vendor', 'quickest supplier', 'shortest lead time' — always use query_supplier with sort_by=lead_time, regardless of prior context. "
+        "For 'slowest supplier', 'longest lead time' — use query_supplier with sort_by=lead_time (DESC handled by executor). "
+        "For 'their lead time', 'what is their contact', 'their phone' — use query_supplier and extract the drug from the previous context. "
+        "For 'now show bottom N', 'now show top N', 'flip to bottom' — keep the same sort_by metric from context, only change direction. "
+        "For 'how much this month', 'revenue this month', 'monthly revenue' — use query_sales with period=last_week (best available approximation). "
         "For questions completely unrelated to pharmacy (weather, sports, politics, personal) "
         "do NOT call any tool — respond with no tool_call."
     )
@@ -509,7 +539,8 @@ def execute_query_inventory(params: dict) -> str:
         order = "selling_price_usd DESC"
 
     if drug_name:
-        where_clauses.append("LOWER(generic_name) LIKE %s")
+        where_clauses.append("(LOWER(generic_name) LIKE %s OR LOWER(brand_name) LIKE %s)")
+        sql_params.append(f"%{drug_name.lower()}%")
         sql_params.append(f"%{drug_name.lower()}%")
 
     if category:
@@ -783,12 +814,69 @@ def _sales_day_of_week(day_name: str) -> str:
     return out
 
 
+MONTH_MAP = {
+    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12
+}
+
 def execute_query_expiry(params: dict) -> str:
     """Execute expiry query with GPT-provided parameters."""
     drug_name   = params.get("drug_name")
     within_days = params.get("within_days", 90)
     limit       = max(1, min(params.get("limit", 10), 50))
     top_only    = params.get("top_only", False)
+    month_name  = params.get("month_name", "")
+    count_only  = params.get("count_only", False)
+
+    # Named month filter — "expiring in May"
+    if month_name:
+        month_num = MONTH_MAP.get(month_name.lower())
+        if month_num:
+            df = pd.read_sql_query("""
+                SELECT i.generic_name, i.brand_name, b.batch_number, b.expiry_date,
+                       b.quantity_remaining,
+                       (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days_remaining
+                FROM batches b JOIN inventory i ON b.product_id = i.product_id
+                WHERE EXTRACT(MONTH FROM b.expiry_date::date) = %s
+                  AND EXTRACT(YEAR  FROM b.expiry_date::date) >= EXTRACT(YEAR FROM CURRENT_DATE)
+                ORDER BY b.expiry_date ASC
+            """, get_engine(), params=(month_num,))
+            if df.empty:
+                return f"✅ No batches expiring in {month_name.capitalize()}."
+            header  = f"**Batches expiring in {month_name.capitalize()}** — {len(df)} found:\n\n"
+            header += "| Drug | Brand | Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|---|---|\n"
+            rows = []
+            for _, r in df.iterrows():
+                d = r['days_remaining']
+                flag = "🚨 URGENT" if d < 30 else ("⚠️ Warning" if d < 90 else "📅 Monitor")
+                rows.append(
+                    f"| {r['generic_name']} | {r['brand_name']} | {r['batch_number']} | "
+                    f"{str(r['expiry_date'])[:10]} | **{d}** | {r['quantity_remaining']} | {flag} |"
+                )
+            return header + "\n".join(rows)
+
+    # Batch count per drug — "which drugs have more than 3 batches"
+    if count_only:
+        min_batches = params.get("min_batches", 2)
+        df = pd.read_sql_query("""
+            SELECT i.generic_name, i.brand_name, COUNT(b.batch_id) AS batch_count,
+                   MIN(b.expiry_date) AS nearest_expiry,
+                   SUM(b.quantity_remaining) AS total_qty
+            FROM inventory i JOIN batches b ON i.product_id = b.product_id
+            GROUP BY i.product_id, i.generic_name, i.brand_name
+            HAVING COUNT(b.batch_id) >= %s
+            ORDER BY batch_count DESC
+        """, get_engine(), params=(min_batches,))
+        if df.empty:
+            return f"No drugs found with {min_batches} or more batches."
+        header  = f"**Drugs with {min_batches}+ batches:**\n\n"
+        header += "| Drug | Brand | Batches | Nearest Expiry | Total Qty |\n|---|---|---|---|---|\n"
+        rows = [
+            f"| {r['generic_name']} | {r['brand_name']} | **{r['batch_count']}** | "
+            f"{str(r['nearest_expiry'])[:10]} | {r['total_qty']} |"
+            for _, r in df.iterrows()
+        ]
+        return header + "\n".join(rows)
 
     if drug_name:
         df = pd.read_sql_query("""
@@ -856,16 +944,19 @@ def execute_query_supplier(params: dict) -> str:
     limit     = max(1, min(params.get("limit", 5), 20))
 
     # Lead time ranking
+    direction = params.get("direction", "asc")
     if sort_by == "lead_time" and not drug_name:
-        results = run_cypher("""
+        order = "ASC" if direction != "desc" else "DESC"
+        label = "fastest" if order == "ASC" else "slowest"
+        results = run_cypher(f"""
             MATCH (s:Supplier)
             RETURN s.name AS supplier, s.lead_time AS lead_time_days,
                    s.city AS city, s.contact AS contact
-            ORDER BY s.lead_time ASC LIMIT 5
+            ORDER BY s.lead_time {order} LIMIT 5
         """)
         if not results:
             return "❌ No supplier information found."
-        header = "**Suppliers by lead time:**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
+        header = f"**Suppliers by lead time ({label} first):**\n\n| Supplier | Lead Time | City | Contact |\n|---|---|---|---|\n"
         return header + "\n".join(
             f"| {r['supplier']} | {r['lead_time_days']} days | {r['city']} | {r['contact']} |"
             for r in results
@@ -887,8 +978,9 @@ def execute_query_supplier(params: dict) -> str:
             for r in results
         )
 
-    # Drug-specific supplier
+    # Drug-specific or category-specific supplier
     if drug_name:
+        # First try exact drug match
         results = run_cypher("""
             MATCH (d:Drug)-[:SUPPLIED_BY]->(s:Supplier)
             WHERE toLower(d.generic_name) CONTAINS toLower($search)
@@ -898,27 +990,54 @@ def execute_query_supplier(params: dict) -> str:
                    s.payment_terms AS payment_terms
             LIMIT 5
         """, {"search": drug_name})
+        # If not found as drug, try as category (e.g. "antibiotics")
+        if not results:
+            df_cat = pd.read_sql_query("""
+                    SELECT DISTINCT i.generic_name
+                    FROM inventory i
+                    WHERE LOWER(i.category) LIKE %s
+                    LIMIT 5
+                """, get_engine(), params=(f"%{drug_name.lower()}%",))
+            if not df_cat.empty:
+                cat_drugs = df_cat["generic_name"].tolist()
+                results = run_cypher("""
+                    MATCH (d:Drug)-[:SUPPLIED_BY]->(s:Supplier)
+                    WHERE d.generic_name IN $drugs
+                    RETURN d.generic_name AS drug, s.name AS supplier,
+                           s.contact AS contact, s.phone AS phone,
+                           s.city AS city, s.lead_time AS lead_time_days,
+                           s.payment_terms AS payment_terms
+                    ORDER BY s.lead_time ASC LIMIT 5
+                """, {"drugs": cat_drugs})
         if not results:
             return f"❌ No supplier found for {drug_name}."
-        r = results[0]
-        return (
-            f"**Supplier for {r['drug']}:**\n\n"
-            "| Field | Value |\n|---|---|\n"
-            f"| Supplier | **{r['supplier']}** |\n"
-            f"| Contact | {r['contact']} |\n"
-            f"| Phone | {r['phone']} |\n"
-            f"| City | {r['city']} |\n"
-            f"| Lead Time | {r['lead_time_days']} days |\n"
-            f"| Payment Terms | {r['payment_terms']} |\n"
+        if len(results) == 1:
+            r = results[0]
+            return (
+                f"**Supplier for {r['drug']}:**\n\n"
+                "| Field | Value |\n|---|---|\n"
+                f"| Supplier | **{r['supplier']}** |\n"
+                f"| Contact | {r['contact']} |\n"
+                f"| Phone | {r['phone']} |\n"
+                f"| City | {r['city']} |\n"
+                f"| Lead Time | {r['lead_time_days']} days |\n"
+                f"| Payment Terms | {r['payment_terms']} |\n"
+            )
+        # Multiple results (category query)
+        header = f"**Suppliers for {drug_name}:**\n\n| Drug | Supplier | City | Lead Time | Contact |\n|---|---|---|---|---|\n"
+        return header + "\n".join(
+            f"| {r['drug']} | {r['supplier']} | {r['city']} | {r['lead_time_days']} days | {r['contact']} |"
+            for r in results
         )
 
-    # Default — city breakdown
+    # Default — total count + city breakdown
     results = run_cypher("""
         MATCH (s:Supplier)
         RETURN s.city AS city, count(s) AS supplier_count, collect(s.name) AS suppliers
         ORDER BY supplier_count DESC
     """)
-    header = "**Suppliers by City:**\n\n| City | Count | Suppliers |\n|---|---|---|\n"
+    total = sum(r['supplier_count'] for r in results)
+    header = f"**{total} suppliers** across {len(results)} cities:\n\n| City | Count | Suppliers |\n|---|---|---|\n"
     return header + "\n".join(
         f"| {r['city']} | {r['supplier_count']} | {', '.join(r['suppliers'])} |"
         for r in results
@@ -1396,6 +1515,33 @@ def _out_of_scope_response() -> str:
 # MAIN ROUTER
 # ══════════════════════════════════════════════════════════════════
 
+def _combined_low_expiry() -> str:
+    """Drugs that are BOTH low on stock AND have batches expiring within 90 days."""
+    df = pd.read_sql_query("""
+        SELECT i.generic_name, i.brand_name, i.quantity_in_stock, i.reorder_level,
+               ROUND((i.quantity_in_stock::numeric/NULLIF(i.reorder_level,0))*100,0) AS stock_pct,
+               MIN(b.expiry_date) AS nearest_expiry,
+               (MIN(b.expiry_date::date) - CURRENT_DATE)::INTEGER AS days_to_expiry
+        FROM inventory i
+        JOIN batches b ON i.product_id = b.product_id
+        WHERE i.quantity_in_stock <= i.reorder_level
+          AND (b.expiry_date::date - CURRENT_DATE) <= 90
+        GROUP BY i.product_id, i.generic_name, i.brand_name,
+                 i.quantity_in_stock, i.reorder_level
+        ORDER BY days_to_expiry ASC, stock_pct ASC
+    """, get_engine())
+    if df.empty:
+        return "✅ No drugs are currently both low on stock AND expiring within 90 days."
+    header  = f"**⚠️ {len(df)} drug(s) — LOW STOCK + EXPIRING SOON:**\n\n"
+    header += "| Drug | Brand | Stock | Reorder | Stock% | Nearest Expiry | Days Left |\n|---|---|---|---|---|---|---|\n"
+    rows = [
+        f"| {r['generic_name']} | {r['brand_name']} | **{r['quantity_in_stock']}** | "
+        f"{r['reorder_level']} | {r['stock_pct']:.0f}% | {str(r['nearest_expiry'])[:10]} | **{r['days_to_expiry']}** |"
+        for _, r in df.iterrows()
+    ]
+    return header + "\n".join(rows)
+
+
 def route_and_respond(question: str, conversation_history=None):
     """
     Returns (answer: str, source: str, mode: str)
@@ -1435,6 +1581,8 @@ def route_and_respond(question: str, conversation_history=None):
         return _wrap(format_stats()), "inventory database", "operational"
     if tool == "query_briefing":
         return format_daily_briefing(), "inventory + batch + transaction records", "operational"
+    if tool == "query_combined_risk":
+        return _combined_low_expiry(), "inventory + batch records", "operational"
     if tool == "query_reorder":
         return format_reorder_list(), "inventory + transaction records", "operational"
     if tool == "query_forecast":
