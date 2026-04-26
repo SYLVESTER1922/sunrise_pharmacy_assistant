@@ -2270,8 +2270,8 @@ def respond(message, chat_history, search_history, memory_context=None):
         if _is_followup_question(corrected_message, mem):
             answer, source, mode, intent = handle_followup_with_memory(corrected_message, mem, conversation_history)
         else:
-            # Do not let old chatbot internals decide follow-up; explicit memory handles that.
-            answer, source, mode = route_and_respond(corrected_message, [])
+            answer, source, mode = route_and_respond(corrected_message, conversation_history)
+            intent = source  # use source as proxy for memory tracking
 
         full_answer = _format_full_answer(answer, source, mode, correction_note)
         mem = _remember_after_turn(mem, corrected_message, intent, answer, source)
@@ -2413,7 +2413,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
         # ── CENTRE — Chat ─────────────────────────────────────
         with gr.Column(scale=3, min_width=400):
-            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True)
+            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True, type="messages")
             # Drug chips removed
             brief_box = gr.Textbox(
                 label="💡 Key Points",
