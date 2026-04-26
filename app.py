@@ -2268,14 +2268,13 @@ def filter_drugs(search_text):
 # ── Core respond function ─────────────────────────────────────
 def respond(message, chat_history, search_history, memory_context=None):
     msg_text = to_text(message).strip()
-    # Keep chat_history in original tuple format for Gradio display
-    # Use _normalize only for internal conversation history (GPT context)
-    chat_messages = list(chat_history or [])
+    # Normalize to dict format for type="messages" Gradio chatbot
+    chat_messages = _normalize_chat_for_messages(chat_history)
     mem = _safe_memory(memory_context)
 
     if not msg_text:
         history_md = "\n".join([f"- {h}" for h in list(search_history or [])]) or "*No searches yet*"
-        return "", chat_history or [], list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
+        return "", chat_messages, list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
 
     # Convert tuple history to dict format for GPT context
     conversation_history = _normalize_chat_for_messages(chat_messages)
@@ -2305,7 +2304,8 @@ def respond(message, chat_history, search_history, memory_context=None):
         # Keep prior memory instead of corrupting it.
 
     # Gradio without type="messages" needs [user, assistant] tuples
-    chat_messages.append([msg_text, full_answer])
+    chat_messages.append({"role": "user", "content": msg_text})
+    chat_messages.append({"role": "assistant", "content": full_answer})
 
     search_history = list(search_history or [])
     if msg_text and msg_text not in search_history:
@@ -2334,7 +2334,8 @@ def drug_summary_respond(drug_name, chat_history, search_history, memory_context
         drug = to_text(drug_name)
 
     label = f"Quick summary: {drug}"
-    chat_messages.append([label, full_answer])
+    chat_messages.append({"role": "user", "content": label})
+    chat_messages.append({"role": "assistant", "content": full_answer})
 
     search_history = list(search_history or [])
     if label not in search_history:
@@ -2434,7 +2435,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
         # ── CENTRE — Chat ─────────────────────────────────────
         with gr.Column(scale=3, min_width=400):
-            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True)
+            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True, type="messages")
             # Drug chips removed
             brief_box = gr.Textbox(
                 label="💡 Key Points",
