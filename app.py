@@ -444,13 +444,68 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         drug = question.replace("quick summary:", "").replace("Quick summary:", "").strip()
         return {"tool": "drug_summary", "params": {"drug_name": drug}, "confidence": 1.0}
 
+    # ── sales total/summary fast-paths (GPT misroutes these) ──
+    total_units_phrases = [
+        "how many units", "total units sold", "units sold in total",
+        "how much have we sold", "total sales units", "units have we sold"
+    ]
+    avg_revenue_phrases = [
+        "average daily revenue", "avg daily revenue", "average revenue per day",
+        "daily revenue average", "what is our average"
+    ]
+    this_month_phrases = [
+        "this month", "how much this month", "revenue this month",
+        "this months revenue", "monthly revenue", "made this month"
+    ]
+    best_day_phrases = [
+        "which day", "what day", "busiest day", "best day of the week",
+        "highest revenue day", "most revenue day", "day of the week has"
+    ]
+    if any(p in q_clean for p in total_units_phrases):
+        return {"tool": "query_sales", "params": {"period": "total_summary"}, "confidence": 1.0}
+    if any(p in q_clean for p in avg_revenue_phrases):
+        return {"tool": "query_sales", "params": {"period": "total_summary"}, "confidence": 1.0}
+    if any(p in q_clean for p in this_month_phrases):
+        return {"tool": "query_sales", "params": {"period": "current_month"}, "confidence": 1.0}
+    if any(p in q_clean for p in best_day_phrases):
+        return {"tool": "query_sales", "params": {"period": "best_day"}, "confidence": 1.0}
+
+    # ── batch count fast-path ──
+    import re as _re
+    batch_count_match = _re.search(r"(more than|at least|over|above|[0-9]+)\s+([0-9]+)?\s*batch", q_clean)
+    batch_plain = any(p in q_clean for p in ["how many batches", "number of batches", "batch count"])
+    if batch_count_match or batch_plain:
+        nums = _re.findall(r"[0-9]+", q_clean)
+        min_b = int(nums[0]) + 1 if batch_count_match and nums else (int(nums[0]) if nums else 2)
+        return {"tool": "query_expiry", "params": {"count_only": True, "min_batches": min_b}, "confidence": 1.0}
+    # "what about N batches" follow-up
+    about_batch = _re.search(r"what about\s+([0-9]+)\s+batch", q_clean)
+    if about_batch:
+        min_b = int(about_batch.group(1))
+        return {"tool": "query_expiry", "params": {"count_only": True, "min_batches": min_b}, "confidence": 1.0}
+
     # ── Build context note for follow-up detection ──
     context = ""
     if conversation_history:
-        last = conversation_history[-1]
-        prev = last.get("content", "")[:200] if isinstance(last, dict) else ""
-        if prev:
-            context = f"\n\nPrevious response context (for follow-up detection):\n{prev}"
+        last_asst = next(
+            (m for m in reversed(conversation_history)
+             if isinstance(m, dict) and m.get("role") == "assistant"),
+            None
+        )
+        if last_asst:
+            prev = last_asst.get("content", "")
+            if isinstance(prev, list):
+                prev = " ".join(c.get("text","") if isinstance(c,dict) else str(c) for c in prev)
+            prev = str(prev)[:300]
+            sort_hint = ""
+            if "by revenue" in prev.lower():
+                sort_hint = " Previous query used sort_by=revenue — preserve that metric."
+            elif "by units" in prev.lower():
+                sort_hint = " Previous query used sort_by=units — preserve that metric."
+            elif "by transactions" in prev.lower():
+                sort_hint = " Previous query used sort_by=transactions — preserve that metric."
+            if prev:
+                context = f"\n\nPrevious assistant response:\n{prev}{sort_hint}"
 
     system = (
         "You are a pharmacy operations assistant. "
@@ -1607,7 +1662,11 @@ def generate_clinical_answer(question, intent, source, data, conversation_histor
         temperature=0.0,
         max_tokens=400
     )
-    return response.choices[0].message.content + CLINICAL_DISCLAIMER
+    result = response.choices[0].message.content
+    # Avoid double disclaimer if GPT already wrote one
+    if "Clinical Disclaimer" in result:
+        return result
+    return result + CLINICAL_DISCLAIMER
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1704,6 +1763,9 @@ def route_and_respond(question: str, conversation_history=None):
     params = result["params"]
 
     def _wrap(answer):
+        # Remove duplicate disclaimer if correction note + answer both have it
+        if correction_note and "Clinical Disclaimer" in answer:
+            return f"{correction_note}\n\n{answer}"
         return f"{correction_note}\n\n{answer}" if correction_note else answer
 
     # ── System responses ────────────────────────────────────────────
