@@ -2336,6 +2336,17 @@ def _format_full_answer(answer, source, mode, correction_note=""):
 
 # ── Gradio UI
 
+QUICK_QUESTIONS = [
+    "Good morning",
+    "Which drugs are running low on stock?",
+    "Which batches are expiring soon?",
+    "What is the reorder list?",
+    "What are the top selling drugs?",
+    "Revenue forecast",
+    "Do we have amoxicillin in stock?",
+    "What interacts with metformin?",
+]
+
 with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     gr.HTML("""
