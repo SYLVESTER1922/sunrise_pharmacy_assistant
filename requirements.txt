@@ -1,5 +1,5 @@
-gradio
-neo4j
-openai
-pandas
-psycopg2-binary
+gradio>=4.44.0
+openai>=1.0.0
+neo4j>=5.0.0
+psycopg2-binary>=2.9.0
+pandas>=2.0.0
