@@ -524,7 +524,7 @@ def execute_query_inventory(params: dict) -> str:
                quantity_in_stock, reorder_level, selling_price_usd,
                cost_price_usd, shelf_location, category,
                ROUND((quantity_in_stock::numeric/NULLIF(reorder_level,0))*100,0) AS stock_pct,
-               ROUND(((selling_price_usd - cost_price_usd)/NULLIF(selling_price_usd,0))*100,1) AS margin
+               ROUND(((selling_price_usd - cost_price_usd)/NULLIF(selling_price_usd,0)*100)::numeric,1) AS margin
         FROM inventory
         {where}
         ORDER BY {order}
@@ -1309,22 +1309,15 @@ def _cat_hour() -> int:
 def get_greeting_response() -> str:
     hour = _cat_hour()
     if hour < 12:
-        tod, emoji = "Good morning", "🌅"
+        tod = "Good morning"
     elif hour < 17:
-        tod, emoji = "Good afternoon", "☀️"
+        tod = "Good afternoon"
     else:
-        tod, emoji = "Good evening", "🌙"
+        tod = "Good evening"
     return (
-        f"{emoji} {tod}! Welcome to the Sunrise Pharmacy Assistant.\n\n"
-        "Just ask me anything about the pharmacy — I understand natural language. For example:\n\n"
-        "- *\"Do we have amoxicillin in stock?\"*\n"
-        "- *\"Which drugs need reordering?\"*\n"
-        "- *\"What interacts with metformin?\"*\n"
-        "- *\"Who supplies ciprofloxacin?\"*\n"
-        "- *\"What are our top selling drugs?\"*\n"
-        "- *\"Which batches are expiring soon?\"*\n\n"
-        "💡 **Tip:** Ask for a **\"daily briefing\"** to get low stock, urgent expiries "
-        "and yesterday's revenue all in one message."
+        f"{tod}! I'm your Sunrise Pharmacy Assistant. "
+        "Ask me about stock levels, expiry dates, sales, suppliers, or drug interactions — "
+        "whatever you need. How can I help?"
     )
 
 
