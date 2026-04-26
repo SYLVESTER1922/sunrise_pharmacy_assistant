@@ -117,7 +117,7 @@ print("Supabase connection pool ready ✓")
 def get_all_drugs():
     df = pd.read_sql_query(
         "SELECT generic_name, brand_name, category FROM inventory ORDER BY generic_name",
-        conn
+        get_engine()
     )
     return df
 
