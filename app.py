@@ -2336,6 +2336,17 @@ def _format_full_answer(answer, source, mode, correction_note=""):
 
 # ── Gradio UI
 
+def reask_from_history(selected_question, chat_history, search_history, memory_context=None):
+    if not selected_question:
+        return "", chat_history, search_history, memory_context or {}, gr.update(), gr.update(), ""
+    return respond(selected_question, chat_history, search_history, memory_context)
+
+
+def click_quick_question(question, chat_history, search_history, memory_context=None):
+    return respond(question, chat_history, search_history, memory_context)
+
+
+
 QUICK_QUESTIONS = [
     "Good morning",
     "Which drugs are running low on stock?",
@@ -2461,25 +2472,27 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         [msg, chatbot, search_history_state, memory_state],
         [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
 
-    def transcribe_audio(audio_path, chat_history, search_history):
+    def transcribe_audio(audio_path, chat_history, search_history, memory_context=None):
+        mem = memory_context or {}
+        empty = ("", chat_history, search_history, mem, gr.update(), gr.update(), gr.update(value=None), "")
         if not audio_path:
-            return "", chat_history, search_history, gr.update(), gr.update(), gr.update(value=None), ""
+            return empty
         try:
             with open(audio_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1", file=f
                 )
             transcribed = transcript.text
-            result = respond(transcribed, chat_history, search_history)
-            # result is (msg, chat, search, dropdown, history_md, brief)
-            # Add audio reset at end
-            return result[0], result[1], result[2], result[3], result[4], gr.update(value=None), result[5]
+            result = respond(transcribed, chat_history, search_history, mem)
+            # result = ("", chat, search, mem, dropdown, history_md, brief) — 7 items
+            return result[0], result[1], result[2], result[3], result[4], result[5], gr.update(value=None), result[6]
         except Exception as e:
-            return "", chat_history, search_history, gr.update(), gr.update(), gr.update(value=None), ""
+            print(f"Transcription failed: {e}")
+            return empty
 
     audio_input.stop_recording(transcribe_audio,
         [audio_input, chatbot, search_history_state, memory_state],
-        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, audio_input, brief_box])
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box, audio_input])
 
     history_dropdown.change(reask_from_history,
         [history_dropdown, chatbot, search_history_state, memory_state],
@@ -2494,8 +2507,8 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     drug_search.change(filter_drugs, [drug_search], [drug_dropdown])
     drug_lookup_btn.click(drug_summary_respond,
-        [drug_dropdown, chatbot, search_history_state],
-        [chatbot, search_history_state, history_dropdown, history_display, brief_box],
+        [drug_dropdown, chatbot, search_history_state, memory_state],
+        [chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box],
         scroll_to_output=True)
 
     def do_export(chat_history):
