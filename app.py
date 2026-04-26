@@ -205,10 +205,13 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "query_inventory",
             "description": (
-                "Query drug inventory — stock levels, prices, categories, low stock alerts. "
+                "Query drug inventory — stock levels, prices, categories, low stock alerts, profit margins. "
                 "Do NOT use for batch or expiry questions — use query_expiry for those. "
-                "Use filter=below_reorder for: 'running low', 'need restocking', 'critical stock', "
-                "'which drugs are low', 'drugs below reorder level'."
+                "Use filter=below_reorder for: 'running low', 'need restocking', 'critical stock', 'which drugs are low'. "
+                "Use sort_by=margin_desc for: 'highest profit margin', 'most profitable drug', 'best margin'. "
+                "Use sort_by=margin_asc for: 'lowest margin', 'least profitable'. "
+                "Use filter=cheapest + sort_by=price_asc for: 'cheapest drugs'. "
+                "Use filter=most_expensive + sort_by=price_desc for: 'most expensive drugs'."
             ),
             "parameters": {
                 "type": "object",
@@ -248,8 +251,18 @@ TOOLS_SCHEMA = [
                     "sort_by":     {"type": "string",  "enum": ["revenue", "units", "transactions"], "description": "Metric to rank by"},
                     "period":      {
                         "type": "string",
-                        "enum": ["all_time", "last_day", "last_week", "day_of_week", "customer_type"],
-                        "description": "Time period. Use all_time for general top/bottom queries. Use last_week only when user explicitly says 'last week' OR 'this month' (best available). Use last_day for: 'yesterday revenue', 'yesterday sales', 'how much did we make yesterday', 'last day sales', 'how many transactions yesterday'."
+                        "enum": ["all_time", "last_day", "last_week", "current_month", "day_of_week", "best_day", "customer_type", "total_summary"],
+                        "description": (
+                            "Time period / query mode. "
+                            "Use all_time for general top/bottom drug rankings. "
+                            "Use last_day for: yesterday revenue, yesterday sales, how many transactions yesterday. "
+                            "Use last_week for: last week sales, last 7 days. "
+                            "Use current_month for: this month revenue, how much this month, monthly total. "
+                            "Use best_day for: which day of the week has highest sales/revenue, busiest day, best day. "
+                            "Use total_summary for: how many units did we sell in total, total transactions, total revenue summary, average daily revenue. "
+                            "Use day_of_week + day_name for: sales on Friday, what happened on Saturday. "
+                            "Use customer_type for: sales by customer type, walk-in vs prescription."
+                        )
                     },
                     "day_name":    {"type": "string",  "description": "Day name e.g. Saturday, only for day_of_week period"},
                     "limit":       {"type": "integer", "description": "Number of results, default 10"}
@@ -287,9 +300,10 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "query_supplier",
             "description": (
-                "Query supplier information — who supplies a drug, lead times, city breakdown, supplier count. "
+                "Query supplier information — who supplies a drug, lead times, city breakdown, supplier count, payment terms. "
                 "Triggered by: supplier, vendor, distributor, buy from, order from, who supplies, source, "
-                "'how many suppliers', 'fastest vendor', 'fastest supplier', 'quickest lead time'."
+                "'how many suppliers', 'fastest vendor', 'fastest supplier', 'quickest lead time', "
+                "'best payment terms', 'payment terms', 'credit terms', 'who gives best terms'."
             ),
             "parameters": {
                 "type": "object",
@@ -448,11 +462,13 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         "'what about X', 'and Y' — use the same tool as the previous response context. "
         "For 'what about [city]?' or 'and [city]?' or '[city]?' after a supplier query — use query_supplier with city=[city]. "
         "Short location names like 'Harare', 'Bulawayo', 'Mutare' after a supplier question are city filters. "
-        "For 'fastest vendor', 'quickest supplier', 'shortest lead time' — always use query_supplier with sort_by=lead_time, regardless of prior context. "
-        "For 'slowest supplier', 'longest lead time' — use query_supplier with sort_by=lead_time (DESC handled by executor). "
-        "For 'their lead time', 'what is their contact', 'their phone' — use query_supplier and extract the drug from the previous context. "
+        "For 'fastest vendor', 'quickest supplier', 'shortest lead time', 'who is fastest' — ALWAYS use query_supplier with sort_by=lead_time and drug_name=null. NEVER inherit drug context for these. "
+        "For 'slowest supplier', 'longest lead time', 'who is slowest' — use query_supplier with sort_by=lead_time, direction=desc, drug_name=null. NEVER inherit drug context. "
+        "For 'their lead time', 'what is their lead time' — use query_supplier and extract the drug name from the previous assistant response context. "
+        "For 'best payment terms', 'who has best payment terms', 'credit terms' — use query_supplier with sort_by=payment_terms. "
         "For 'now show bottom N', 'now show top N', 'flip to bottom' — keep the same sort_by metric from context, only change direction. "
         "For 'how much this month', 'revenue this month', 'monthly revenue' — use query_sales with period=last_week (best available approximation). "
+        "For clearly clinical questions about a named drug (molecular weight, mechanism of action, pharmacokinetics) — use query_clinical even if the data may not be in the knowledge base. "
         "For questions completely unrelated to pharmacy (weather, sports, politics, personal) "
         "do NOT call any tool — respond with no tool_call."
     )
@@ -617,11 +633,20 @@ def execute_query_inventory(params: dict) -> str:
         ]
         return header + "\n".join(rows)
 
-    # Ranking (cheapest / most expensive / search results)
+    # Ranking (cheapest / most expensive / margin / search results)
     if filt == "cheapest":
         label = f"Cheapest {limit} drugs in stock"
     elif filt == "most_expensive":
         label = f"Most expensive {limit} drugs"
+    elif sort_by in ("margin_desc", "margin_asc"):
+        label = f"{'Highest' if sort_by == 'margin_desc' else 'Lowest'} margin drugs"
+        header = f"**{label}:**\n\n| Drug | Brand | Sell Price | Cost Price | Margin% | Stock |\n|---|---|---|---|---|---|\n"
+        rows = [
+            f"| {r['generic_name']} | {r['brand_name']} | ${r['selling_price_usd']} | "
+            f"${r['cost_price_usd']} | {r['margin']}% | {r['quantity_in_stock']} |"
+            for _, r in df.iterrows()
+        ]
+        return header + "\n".join(rows)
     elif drug_name:
         label = f"Drugs matching '{drug_name}'"
     else:
@@ -650,6 +675,15 @@ def execute_query_sales(params: dict) -> str:
 
     if period == "last_week":
         return _sales_last_week()
+
+    if period == "current_month":
+        return _sales_current_month()
+
+    if period == "best_day":
+        return _sales_best_day()
+
+    if period == "total_summary":
+        return _sales_total_summary()
 
     if period == "day_of_week" and day_name:
         return _sales_day_of_week(day_name)
@@ -681,6 +715,104 @@ def execute_query_sales(params: dict) -> str:
         for i, (_, r) in enumerate(df.iterrows())
     ]
     return header + "\n".join(rows)
+
+
+def _sales_best_day() -> str:
+    df = pd.read_sql_query(
+        "SELECT TRIM(TO_CHAR(date::date, 'Day')) AS day_name,"
+        " EXTRACT(DOW FROM date::date)::INTEGER AS dow,"
+        " COUNT(DISTINCT date::date) AS occurrences,"
+        " ROUND(SUM(total_amount)::numeric,2) AS total_revenue,"
+        " ROUND(AVG(daily_rev)::numeric,2) AS avg_revenue,"
+        " SUM(quantity_sold) AS total_units,"
+        " COUNT(*) AS total_transactions"
+        " FROM transactions t"
+        " JOIN (SELECT date::date AS d, SUM(total_amount) AS daily_rev"
+        "       FROM transactions GROUP BY date::date) dr ON t.date::date = dr.d"
+        " GROUP BY day_name, dow ORDER BY avg_revenue DESC",
+        get_engine()
+    )
+    if df.empty:
+        return "No sales data available."
+    best_name = str(df.iloc[0]["day_name"]).strip()
+    rows = [
+        "| Day | Avg Revenue | Total Revenue | Occurrences | Transactions | Units |",
+        "|---|---|---|---|---|---|"
+    ]
+    for _, r in df.iterrows():
+        dn = str(r["day_name"]).strip()
+        star = " ⭐" if dn == best_name else ""
+        rows.append(
+            f"| {dn}{star} | **${r['avg_revenue']:,.2f}** | "
+            f"${r['total_revenue']:,.2f} | {r['occurrences']} | "
+            f"{r['total_transactions']} | {r['total_units']} |"
+        )
+    header = "**Revenue by Day of Week** \u2014 best day is **" + best_name + "**\n\n"
+    return header + "\n".join(rows)
+
+
+def _sales_current_month() -> str:
+    df_total = pd.read_sql_query(
+        "SELECT TO_CHAR(DATE_TRUNC('month', CURRENT_DATE), 'Month YYYY') AS month_label,"
+        " COUNT(*) AS transactions, SUM(quantity_sold) AS total_units,"
+        " ROUND(SUM(total_amount)::numeric,2) AS total_revenue"
+        " FROM transactions WHERE date::date >= DATE_TRUNC('month', CURRENT_DATE)",
+        get_engine()
+    )
+    df_daily = pd.read_sql_query(
+        "SELECT date::date AS day, COUNT(*) AS txns, SUM(quantity_sold) AS units,"
+        " ROUND(SUM(total_amount)::numeric,2) AS revenue"
+        " FROM transactions WHERE date::date >= DATE_TRUNC('month', CURRENT_DATE)"
+        " GROUP BY date::date ORDER BY date::date DESC",
+        get_engine()
+    )
+    r = df_total.iloc[0]
+    month = str(r["month_label"]).strip() if r["month_label"] else "This month"
+    if not r["total_revenue"]:
+        return "No transactions recorded for " + month + " yet."
+    out = (
+        "**" + month + " Revenue**\n\n"
+        + f"Total Revenue: **${r['total_revenue']:,.2f}** | "
+        + f"Transactions: **{r['transactions']}** | Units: **{r['total_units']}**\n\n"
+    )
+    if not df_daily.empty:
+        days = len(df_daily)
+        avg  = round(float(r["total_revenue"]) / days, 2)
+        out += f"Days recorded: **{days}** | Daily average: **${avg:,.2f}**\n\n"
+        out += "| Date | Transactions | Units | Revenue |\n|---|---|---|---|\n"
+        out += "\n".join(
+            f"| {str(row['day'])[:10]} | {row['txns']} | {row['units']} | ${row['revenue']:,.2f} |"
+            for _, row in df_daily.iterrows()
+        )
+    return out
+
+
+def _sales_total_summary() -> str:
+    df = pd.read_sql_query(
+        "SELECT COUNT(*) AS total_transactions, SUM(quantity_sold) AS total_units,"
+        " ROUND(SUM(total_amount)::numeric,2) AS total_revenue,"
+        " COUNT(DISTINCT date::date) AS trading_days,"
+        " ROUND(AVG(daily_rev)::numeric,2) AS avg_daily_revenue,"
+        " MIN(date::date) AS first_date, MAX(date::date) AS last_date"
+        " FROM transactions"
+        " JOIN (SELECT date::date AS d, SUM(total_amount) AS daily_rev"
+        "       FROM transactions GROUP BY date::date) dr"
+        " ON transactions.date::date = dr.d",
+        get_engine()
+    )
+    r = df.iloc[0]
+    first = str(r["first_date"])[:10]
+    last  = str(r["last_date"])[:10]
+    return (
+        "**Overall Sales Summary**\n\n"
+        "| Metric | Value |\n|---|---|\n"
+        f"| Total Revenue | **${r['total_revenue']:,.2f}** |\n"
+        f"| Total Units Sold | **{r['total_units']}** |\n"
+        f"| Total Transactions | **{r['total_transactions']}** |\n"
+        f"| Trading Days | {r['trading_days']} |\n"
+        f"| Avg Daily Revenue | **${r['avg_daily_revenue']:,.2f}** |\n"
+        f"| Date Range | {first} \u2192 {last} |\n"
+    )
 
 
 def _sales_customer_type() -> str:
@@ -943,6 +1075,24 @@ def execute_query_supplier(params: dict) -> str:
     sort_by   = params.get("sort_by", "name")
     limit     = max(1, min(params.get("limit", 5), 20))
 
+    # Payment terms ranking
+    if sort_by == "payment_terms" and not drug_name:
+        results = run_cypher("""
+            MATCH (s:Supplier)
+            RETURN DISTINCT s.name AS supplier, s.payment_terms AS payment_terms,
+                   s.lead_time AS lead_time_days, s.city AS city, s.contact AS contact
+            ORDER BY s.payment_terms DESC
+            LIMIT 10
+        """)
+        if not results:
+            return "❌ No supplier payment terms found."
+        header = ("**Suppliers by Payment Terms:**\n\n"
+                  "| Supplier | Payment Terms | Lead Time | City | Contact |\n"
+                  "|---|---|---|---|---|\n")
+        return header + "\n".join(
+            f"| {r['supplier']} | **{r['payment_terms']}** | {r['lead_time_days']} days | {r['city']} | {r['contact']} |"
+            for r in results
+        )
     # Lead time ranking
     direction = params.get("direction", "asc")
     if sort_by == "lead_time" and not drug_name:
@@ -984,7 +1134,7 @@ def execute_query_supplier(params: dict) -> str:
         results = run_cypher("""
             MATCH (d:Drug)-[:SUPPLIED_BY]->(s:Supplier)
             WHERE toLower(d.generic_name) CONTAINS toLower($search)
-            RETURN d.generic_name AS drug, s.name AS supplier,
+            RETURN DISTINCT d.generic_name AS drug, s.name AS supplier,
                    s.contact AS contact, s.phone AS phone,
                    s.city AS city, s.lead_time AS lead_time_days,
                    s.payment_terms AS payment_terms
