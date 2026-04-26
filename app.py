@@ -1570,7 +1570,8 @@ def drug_summary_respond(drug_name, chat_history, search_history):
         header = "*📦 Operational data — inventory + batch records*\n\n"
         full_answer = header + answer
     except Exception as e:
-        full_answer = f"Error: {str(e)}"
+        print(f"Drug summary error: {type(e).__name__}: {e}")
+        full_answer = "I couldn’t retrieve that drug summary safely. Please try selecting the drug again."
     label = f"Quick summary: {drug_name}"
     chat_history = list(chat_history or [])
     chat_history.append({"role": "user",      "content": label})
@@ -1593,7 +1594,7 @@ def click_quick_question(question, chat_history, search_history):
 
 def reask_from_history(selected_question, chat_history, search_history):
     if not selected_question:
-        return "", chat_history, search_history, gr.update(), gr.update()
+        return "", chat_history, search_history, gr.update(), gr.update(), ""
     return respond(selected_question, chat_history, search_history)
 
 # ═══════════════════════════════════════════════════════════════
@@ -2272,7 +2273,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
         # ── CENTRE — Chat ─────────────────────────────────────
         with gr.Column(scale=3, min_width=400):
-            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True)
+            chatbot = gr.Chatbot(label="Pharmacy Assistant", height=460, autoscroll=True, type="messages")
             # Drug chips removed
             brief_box = gr.Textbox(
                 label="💡 Key Points",
