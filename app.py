@@ -99,19 +99,26 @@ def get_conn():
 def release_conn(conn):
     get_pool().putconn(conn)
 
+# ── SQLAlchemy engine — used by pandas read_sql_query ─────────────
+from sqlalchemy import create_engine as _sa_create_engine
+_sa_engine = None
+
+def get_engine():
+    """Return a reusable SQLAlchemy engine for pandas queries."""
+    global _sa_engine
+    if _sa_engine is None:
+        _sa_engine = _sa_create_engine(SUPABASE_URL)
+    return _sa_engine
+
 print("Supabase connection pool ready ✓")
 
 
 # ── Load drug list at startup ─────────────────────────────────────
 def get_all_drugs():
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(
-            "SELECT generic_name, brand_name, category FROM inventory ORDER BY generic_name",
-            conn
-        )
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query(
+        "SELECT generic_name, brand_name, category FROM inventory ORDER BY generic_name",
+        conn
+    )
     return df
 
 DRUGS_DF   = get_all_drugs()
@@ -525,11 +532,7 @@ def execute_query_inventory(params: dict) -> str:
     """
     sql_params.append(limit)
 
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(sql, conn, params=tuple(sql_params))
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query(sql, get_engine(), params=tuple(sql_params))
 
     if df.empty:
         if filt == "below_reorder":
@@ -608,21 +611,17 @@ def execute_query_sales(params: dict) -> str:
     sort_col  = col_map.get(sort_by, "total_revenue")
     sort_label = f"by {sort_by}"
 
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(f"""
-            SELECT i.brand_name, i.generic_name,
-                   SUM(t.quantity_sold)                    AS total_units,
-                   ROUND(SUM(t.total_amount)::numeric, 2)  AS total_revenue,
-                   COUNT(*)                                 AS num_transactions
-            FROM transactions t
-            JOIN inventory i ON t.product_id = i.product_id
-            GROUP BY i.brand_name, i.generic_name
-            ORDER BY {sort_col} {order}
-            LIMIT %s
-        """, conn, params=(limit,))
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query(f"""
+        SELECT i.brand_name, i.generic_name,
+               SUM(t.quantity_sold)                    AS total_units,
+               ROUND(SUM(t.total_amount)::numeric, 2)  AS total_revenue,
+               COUNT(*)                                 AS num_transactions
+        FROM transactions t
+        JOIN inventory i ON t.product_id = i.product_id
+        GROUP BY i.brand_name, i.generic_name
+        ORDER BY {sort_col} {order}
+        LIMIT %s
+    """, get_engine(), params=(limit,))
 
     header  = f"**{label} Selling Drugs** {sort_label} (Last 30 days)\n\n"
     header += "| Rank | Brand | Generic | Units | Revenue | Transactions |\n|---|---|---|---|---|---|\n"
@@ -635,22 +634,18 @@ def execute_query_sales(params: dict) -> str:
 
 
 def _sales_customer_type() -> str:
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT customer_type,
-                   COUNT(*)                                  AS num_transactions,
-                   SUM(quantity_sold)                        AS total_units,
-                   ROUND(SUM(total_amount)::numeric, 2)      AS total_revenue,
-                   ROUND((SUM(total_amount) * 100.0 /
-                       (SELECT SUM(total_amount) FROM transactions))::numeric, 1)
-                   AS revenue_pct
-            FROM transactions
-            GROUP BY customer_type
-            ORDER BY total_revenue DESC
-        """, conn)
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT customer_type,
+               COUNT(*)                                  AS num_transactions,
+               SUM(quantity_sold)                        AS total_units,
+               ROUND(SUM(total_amount)::numeric, 2)      AS total_revenue,
+               ROUND((SUM(total_amount) * 100.0 /
+                   (SELECT SUM(total_amount) FROM transactions))::numeric, 1)
+               AS revenue_pct
+        FROM transactions
+        GROUP BY customer_type
+        ORDER BY total_revenue DESC
+    """, get_engine())
     header  = "**Sales by Customer Type** (Last 30 days)\n\n"
     header += "| Customer Type | Transactions | Units Sold | Revenue | % of Total |\n|---|---|---|---|---|\n"
     rows = [
@@ -663,33 +658,29 @@ def _sales_customer_type() -> str:
 
 
 def _sales_last_day() -> str:
-    conn = get_conn()
-    try:
-        df_d  = pd.read_sql_query("""
-            SELECT date, COUNT(*) AS num_transactions,
-                   SUM(quantity_sold) AS total_units,
-                   ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
-            FROM transactions
-            WHERE date = (SELECT MAX(date) FROM transactions)
-            GROUP BY date
-        """, conn)
-        df_dr = pd.read_sql_query("""
-            SELECT i.brand_name, i.generic_name,
-                   SUM(t.quantity_sold) AS units,
-                   ROUND(SUM(t.total_amount)::numeric, 2) AS revenue
-            FROM transactions t JOIN inventory i ON t.product_id = i.product_id
-            WHERE t.date = (SELECT MAX(date) FROM transactions)
-            GROUP BY i.brand_name, i.generic_name
-            ORDER BY revenue DESC
-        """, conn)
-        df_ct = pd.read_sql_query("""
-            SELECT customer_type, ROUND(SUM(total_amount)::numeric, 2) AS revenue
-            FROM transactions
-            WHERE date = (SELECT MAX(date) FROM transactions)
-            GROUP BY customer_type ORDER BY revenue DESC
-        """, conn)
-    finally:
-        release_conn(conn)
+    df_d  = pd.read_sql_query("""
+        SELECT date, COUNT(*) AS num_transactions,
+               SUM(quantity_sold) AS total_units,
+               ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
+        FROM transactions
+        WHERE date = (SELECT MAX(date) FROM transactions)
+        GROUP BY date
+    """, get_engine())
+    df_dr = pd.read_sql_query("""
+        SELECT i.brand_name, i.generic_name,
+               SUM(t.quantity_sold) AS units,
+               ROUND(SUM(t.total_amount)::numeric, 2) AS revenue
+        FROM transactions t JOIN inventory i ON t.product_id = i.product_id
+        WHERE t.date = (SELECT MAX(date) FROM transactions)
+        GROUP BY i.brand_name, i.generic_name
+        ORDER BY revenue DESC
+    """, get_engine())
+    df_ct = pd.read_sql_query("""
+        SELECT customer_type, ROUND(SUM(total_amount)::numeric, 2) AS revenue
+        FROM transactions
+        WHERE date = (SELECT MAX(date) FROM transactions)
+        GROUP BY customer_type ORDER BY revenue DESC
+    """, get_engine())
     if df_d.empty:
         return "No transactions found."
     r = df_d.iloc[0]
@@ -707,18 +698,14 @@ def _sales_last_day() -> str:
 
 
 def _sales_last_week() -> str:
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT date, COUNT(*) AS num_transactions,
-                   SUM(quantity_sold) AS total_units,
-                   ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
-            FROM transactions
-            WHERE date::date >= (SELECT MAX(date::date) - 7 FROM transactions)
-            GROUP BY date ORDER BY date DESC
-        """, conn)
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT date, COUNT(*) AS num_transactions,
+               SUM(quantity_sold) AS total_units,
+               ROUND(SUM(total_amount)::numeric, 2) AS total_revenue
+        FROM transactions
+        WHERE date::date >= (SELECT MAX(date::date) - 7 FROM transactions)
+        GROUP BY date ORDER BY date DESC
+    """, get_engine())
     if df.empty:
         return "No transactions found for last week."
     header = "**Last Week Sales**\n\n| Date | Transactions | Units | Revenue |\n|---|---|---|---|\n"
@@ -732,19 +719,15 @@ def _sales_last_week() -> str:
 def _sales_day_of_week(day_name: str) -> str:
     day_map = {"monday":1,"tuesday":2,"wednesday":3,"thursday":4,"friday":5,"saturday":6,"sunday":0}
     day_num = day_map.get(day_name.lower(), 6)
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT i.brand_name, i.generic_name,
-                   SUM(t.quantity_sold) AS total_units,
-                   ROUND(SUM(t.total_amount)::numeric, 2) AS total_revenue
-            FROM transactions t JOIN inventory i ON t.product_id = i.product_id
-            WHERE EXTRACT(DOW FROM t.date::date) = %s
-            GROUP BY i.brand_name, i.generic_name
-            ORDER BY total_units DESC LIMIT 10
-        """, conn, params=(day_num,))
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT i.brand_name, i.generic_name,
+               SUM(t.quantity_sold) AS total_units,
+               ROUND(SUM(t.total_amount)::numeric, 2) AS total_revenue
+        FROM transactions t JOIN inventory i ON t.product_id = i.product_id
+        WHERE EXTRACT(DOW FROM t.date::date) = %s
+        GROUP BY i.brand_name, i.generic_name
+        ORDER BY total_units DESC LIMIT 10
+    """, get_engine(), params=(day_num,))
     if df.empty:
         return f"No sales data found for {day_name.capitalize()}s."
     header  = f"**Top selling drugs on {day_name.capitalize()}s:**\n\n"
@@ -764,17 +747,13 @@ def execute_query_expiry(params: dict) -> str:
     top_only    = params.get("top_only", False)
 
     if drug_name:
-        conn = get_conn()
-        try:
-            df = pd.read_sql_query("""
-                SELECT b.batch_number, b.expiry_date, b.quantity_remaining,
-                       (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days
-                FROM batches b JOIN inventory i ON b.product_id = i.product_id
-                WHERE LOWER(i.generic_name) LIKE %s
-                ORDER BY b.expiry_date ASC
-            """, conn, params=(f"%{drug_name.lower()}%",))
-        finally:
-            release_conn(conn)
+        df = pd.read_sql_query("""
+            SELECT b.batch_number, b.expiry_date, b.quantity_remaining,
+                   (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days
+            FROM batches b JOIN inventory i ON b.product_id = i.product_id
+            WHERE LOWER(i.generic_name) LIKE %s
+            ORDER BY b.expiry_date ASC
+        """, get_engine(), params=(f"%{drug_name.lower()}%",))
         if df.empty:
             return f"❌ No batch records found for {drug_name}."
         header = f"**{drug_name} — {len(df)} batch(es):**\n\n| Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|\n"
@@ -786,19 +765,15 @@ def execute_query_expiry(params: dict) -> str:
         return header + "\n".join(rows)
 
     # General expiry alert — with optional top_only (first-to-expire)
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT i.generic_name, i.brand_name, b.batch_number, b.expiry_date,
-                   b.quantity_remaining,
-                   (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days_remaining
-            FROM batches b JOIN inventory i ON b.product_id = i.product_id
-            WHERE (b.expiry_date::date - CURRENT_DATE) <= %s
-            ORDER BY b.expiry_date ASC
-            LIMIT %s
-        """, conn, params=(within_days, 1 if top_only else limit))
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT i.generic_name, i.brand_name, b.batch_number, b.expiry_date,
+               b.quantity_remaining,
+               (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days_remaining
+        FROM batches b JOIN inventory i ON b.product_id = i.product_id
+        WHERE (b.expiry_date::date - CURRENT_DATE) <= %s
+        ORDER BY b.expiry_date ASC
+        LIMIT %s
+    """, get_engine(), params=(within_days, 1 if top_only else limit))
 
     if df.empty:
         return f"✅ No batches expiring within {within_days} days."
@@ -907,19 +882,15 @@ def execute_query_supplier(params: dict) -> str:
 
 
 def format_stats() -> str:
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT category,
-                   COUNT(*)               AS drug_count,
-                   SUM(quantity_in_stock) AS total_units,
-                   ROUND(AVG(selling_price_usd)::numeric, 2) AS avg_price,
-                   ROUND(SUM(quantity_in_stock * cost_price_usd)::numeric, 2) AS inventory_value
-            FROM inventory
-            GROUP BY category ORDER BY inventory_value DESC
-        """, conn)
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT category,
+               COUNT(*)               AS drug_count,
+               SUM(quantity_in_stock) AS total_units,
+               ROUND(AVG(selling_price_usd)::numeric, 2) AS avg_price,
+               ROUND(SUM(quantity_in_stock * cost_price_usd)::numeric, 2) AS inventory_value
+        FROM inventory
+        GROUP BY category ORDER BY inventory_value DESC
+    """, get_engine())
     total_drugs = df['drug_count'].sum()
     total_value = df['inventory_value'].sum()
     header  = f"**Inventory Summary** — {total_drugs} products across {len(df)} categories\n\n"
@@ -938,14 +909,10 @@ def format_alternative(drug_name: str) -> str:
     if not drug_name:
         return "❌ Please specify a drug name."
 
-    conn = get_conn()
-    try:
-        result = pd.read_sql_query(
-            "SELECT generic_name, category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1",
-            conn, params=(f"%{drug_name.lower()}%",)
-        )
-    finally:
-        release_conn(conn)
+    result = pd.read_sql_query(
+        "SELECT generic_name, category FROM inventory WHERE LOWER(generic_name) LIKE %s LIMIT 1",
+        get_engine(), params=(f"%{drug_name.lower()}%",)
+    )
 
     if result.empty:
         return f"❌ **{drug_name}** not found in inventory."
@@ -954,19 +921,15 @@ def format_alternative(drug_name: str) -> str:
     category   = result.iloc[0]["category"]
     search_pct = f"%{drug_name.lower()}%"
 
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT generic_name, brand_name, formulation, strength,
-                   quantity_in_stock, selling_price_usd, shelf_location
-            FROM inventory
-            WHERE category = %s
-              AND LOWER(generic_name) NOT LIKE %s
-              AND quantity_in_stock > 0
-            ORDER BY generic_name
-        """, conn, params=(category, search_pct))
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT generic_name, brand_name, formulation, strength,
+               quantity_in_stock, selling_price_usd, shelf_location
+        FROM inventory
+        WHERE category = %s
+          AND LOWER(generic_name) NOT LIKE %s
+          AND quantity_in_stock > 0
+        ORDER BY generic_name
+    """, get_engine(), params=(category, search_pct))
 
     if df.empty:
         return f"❌ No in-stock alternatives found for **{found_name}** in category {category}."
@@ -982,25 +945,21 @@ def format_alternative(drug_name: str) -> str:
 
 
 def format_drug_summary(drug_name: str) -> str:
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT i.generic_name, i.brand_name, i.formulation, i.strength,
-                   i.quantity_in_stock, i.reorder_level,
-                   i.selling_price_usd, i.cost_price_usd,
-                   i.shelf_location, i.category,
-                   MIN(b.expiry_date) AS nearest_expiry,
-                   (MIN(b.expiry_date::date) - CURRENT_DATE)::INTEGER AS days_to_expiry
-            FROM inventory i
-            LEFT JOIN batches b ON i.product_id = b.product_id
-            WHERE LOWER(i.generic_name) LIKE LOWER(%s)
-            GROUP BY i.product_id, i.generic_name, i.brand_name, i.formulation,
-                     i.strength, i.quantity_in_stock, i.reorder_level,
-                     i.selling_price_usd, i.cost_price_usd, i.shelf_location, i.category
-            LIMIT 1
-        """, conn, params=(f"%{drug_name}%",))
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT i.generic_name, i.brand_name, i.formulation, i.strength,
+               i.quantity_in_stock, i.reorder_level,
+               i.selling_price_usd, i.cost_price_usd,
+               i.shelf_location, i.category,
+               MIN(b.expiry_date) AS nearest_expiry,
+               (MIN(b.expiry_date::date) - CURRENT_DATE)::INTEGER AS days_to_expiry
+        FROM inventory i
+        LEFT JOIN batches b ON i.product_id = b.product_id
+        WHERE LOWER(i.generic_name) LIKE LOWER(%s)
+        GROUP BY i.product_id, i.generic_name, i.brand_name, i.formulation,
+                 i.strength, i.quantity_in_stock, i.reorder_level,
+                 i.selling_price_usd, i.cost_price_usd, i.shelf_location, i.category
+        LIMIT 1
+    """, get_engine(), params=(f"%{drug_name}%",))
 
     if df.empty:
         return f"❌ **{drug_name}** not found in inventory."
@@ -1038,35 +997,31 @@ def format_drug_summary(drug_name: str) -> str:
 def format_daily_briefing() -> str:
     today = date.today().strftime("%A, %d %B %Y")
 
-    conn = get_conn()
-    try:
-        df_stock = pd.read_sql_query("""
-            SELECT generic_name, brand_name, quantity_in_stock, reorder_level,
-                   ROUND((quantity_in_stock::numeric/NULLIF(reorder_level,0))*100,0) AS pct
-            FROM inventory WHERE quantity_in_stock <= reorder_level
-            ORDER BY pct ASC LIMIT 5
-        """, conn)
-        df_exp = pd.read_sql_query("""
-            SELECT i.generic_name, i.brand_name, b.batch_number,
-                   (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days_left,
-                   b.quantity_remaining
-            FROM batches b JOIN inventory i ON b.product_id = i.product_id
-            WHERE (b.expiry_date::date - CURRENT_DATE) <= 30
-            ORDER BY days_left ASC LIMIT 5
-        """, conn)
-        df_rev = pd.read_sql_query("""
-            SELECT ROUND(SUM(total_amount)::numeric,2) AS revenue,
-                   COUNT(*) AS txns, SUM(quantity_sold) AS units
-            FROM transactions
-            WHERE date = (SELECT MAX(date) FROM transactions)
-        """, conn)
-        df_avg = pd.read_sql_query("""
-            SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily
-            FROM (SELECT date, SUM(total_amount) AS daily_rev
-                  FROM transactions GROUP BY date) t
-        """, conn)
-    finally:
-        release_conn(conn)
+    df_stock = pd.read_sql_query("""
+        SELECT generic_name, brand_name, quantity_in_stock, reorder_level,
+               ROUND((quantity_in_stock::numeric/NULLIF(reorder_level,0))*100,0) AS pct
+        FROM inventory WHERE quantity_in_stock <= reorder_level
+        ORDER BY pct ASC LIMIT 5
+    """, get_engine())
+    df_exp = pd.read_sql_query("""
+        SELECT i.generic_name, i.brand_name, b.batch_number,
+               (b.expiry_date::date - CURRENT_DATE)::INTEGER AS days_left,
+               b.quantity_remaining
+        FROM batches b JOIN inventory i ON b.product_id = i.product_id
+        WHERE (b.expiry_date::date - CURRENT_DATE) <= 30
+        ORDER BY days_left ASC LIMIT 5
+    """, get_engine())
+    df_rev = pd.read_sql_query("""
+        SELECT ROUND(SUM(total_amount)::numeric,2) AS revenue,
+               COUNT(*) AS txns, SUM(quantity_sold) AS units
+        FROM transactions
+        WHERE date = (SELECT MAX(date) FROM transactions)
+    """, get_engine())
+    df_avg = pd.read_sql_query("""
+        SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily
+        FROM (SELECT date, SUM(total_amount) AS daily_rev
+              FROM transactions GROUP BY date) t
+    """, get_engine())
 
     cat_tz = timezone(timedelta(hours=2))
     hour   = datetime.now(tz=cat_tz).hour
@@ -1106,22 +1061,18 @@ def format_daily_briefing() -> str:
 # ══════════════════════════════════════════════════════════════════
 
 def format_reorder_list() -> str:
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT i.generic_name, i.brand_name, i.quantity_in_stock,
-                   i.reorder_level, i.category,
-                   COALESCE(ROUND(SUM(t.quantity_sold)::numeric/30,1), 0) AS avg_daily_sales,
-                   (i.reorder_level * 2 - i.quantity_in_stock) AS suggested_order
-            FROM inventory i
-            LEFT JOIN transactions t ON i.product_id = t.product_id
-            WHERE i.quantity_in_stock <= i.reorder_level
-            GROUP BY i.product_id, i.generic_name, i.brand_name,
-                     i.quantity_in_stock, i.reorder_level, i.category
-            ORDER BY (i.quantity_in_stock::float/NULLIF(i.reorder_level,1)) ASC
-        """, conn)
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT i.generic_name, i.brand_name, i.quantity_in_stock,
+               i.reorder_level, i.category,
+               COALESCE(ROUND(SUM(t.quantity_sold)::numeric/30,1), 0) AS avg_daily_sales,
+               (i.reorder_level * 2 - i.quantity_in_stock) AS suggested_order
+        FROM inventory i
+        LEFT JOIN transactions t ON i.product_id = t.product_id
+        WHERE i.quantity_in_stock <= i.reorder_level
+        GROUP BY i.product_id, i.generic_name, i.brand_name,
+                 i.quantity_in_stock, i.reorder_level, i.category
+        ORDER BY (i.quantity_in_stock::float/NULLIF(i.reorder_level,1)) ASC
+    """, get_engine())
 
     if df.empty:
         return "✅ All products are above reorder level. No procurement action needed."
@@ -1143,26 +1094,22 @@ def format_reorder_list() -> str:
 # ══════════════════════════════════════════════════════════════════
 
 def format_revenue_forecast() -> str:
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query("""
-            SELECT i.generic_name, i.brand_name, i.quantity_in_stock,
-                   COALESCE(ROUND(SUM(t.quantity_sold)::numeric/30,2), 0) AS avg_daily,
-                   i.selling_price_usd
-            FROM inventory i
-            LEFT JOIN transactions t ON i.product_id = t.product_id
-            GROUP BY i.product_id, i.generic_name, i.brand_name,
-                     i.quantity_in_stock, i.selling_price_usd
-            ORDER BY (i.quantity_in_stock * i.selling_price_usd) DESC
-            LIMIT 15
-        """, conn)
-        df_daily = pd.read_sql_query("""
-            SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily_revenue
-            FROM (SELECT date, SUM(total_amount) AS daily_rev
-                  FROM transactions GROUP BY date) t
-        """, conn)
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query("""
+        SELECT i.generic_name, i.brand_name, i.quantity_in_stock,
+               COALESCE(ROUND(SUM(t.quantity_sold)::numeric/30,2), 0) AS avg_daily,
+               i.selling_price_usd
+        FROM inventory i
+        LEFT JOIN transactions t ON i.product_id = t.product_id
+        GROUP BY i.product_id, i.generic_name, i.brand_name,
+                 i.quantity_in_stock, i.selling_price_usd
+        ORDER BY (i.quantity_in_stock * i.selling_price_usd) DESC
+        LIMIT 15
+    """, get_engine())
+    df_daily = pd.read_sql_query("""
+        SELECT ROUND(AVG(daily_rev)::numeric,2) AS avg_daily_revenue
+        FROM (SELECT date, SUM(total_amount) AS daily_rev
+              FROM transactions GROUP BY date) t
+    """, get_engine())
 
     avg_daily_rev = float(df_daily.iloc[0]['avg_daily_revenue'])
     forecast_30   = round(avg_daily_rev * 30, 2)
@@ -1194,28 +1141,24 @@ def format_reconciliation(drug_name=None) -> str:
     if drug_name:
         drug_filter = "WHERE LOWER(i.generic_name) LIKE %s"
         params = [f"%{drug_name.lower()}%"]
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(f"""
-            SELECT i.generic_name, i.brand_name,
-                   SUM(b.quantity_received) AS total_received,
-                   SUM(t.quantity_sold)     AS total_sold,
-                   i.quantity_in_stock      AS current_stock,
-                   (SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0) - i.quantity_in_stock)
-                       AS discrepancy
-            FROM inventory i
-            LEFT JOIN batches b      ON i.product_id = b.product_id
-            LEFT JOIN transactions t ON i.product_id = t.product_id
-            {drug_filter}
-            GROUP BY i.product_id, i.generic_name, i.brand_name, i.quantity_in_stock
-            HAVING ABS(SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0)
-                       - i.quantity_in_stock) > 5
-            ORDER BY ABS(SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0)
-                         - i.quantity_in_stock) DESC
-            LIMIT 10
-        """, conn, params=params if params else None)
-    finally:
-        release_conn(conn)
+    df = pd.read_sql_query(f"""
+        SELECT i.generic_name, i.brand_name,
+               SUM(b.quantity_received) AS total_received,
+               SUM(t.quantity_sold)     AS total_sold,
+               i.quantity_in_stock      AS current_stock,
+               (SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0) - i.quantity_in_stock)
+                   AS discrepancy
+        FROM inventory i
+        LEFT JOIN batches b      ON i.product_id = b.product_id
+        LEFT JOIN transactions t ON i.product_id = t.product_id
+        {drug_filter}
+        GROUP BY i.product_id, i.generic_name, i.brand_name, i.quantity_in_stock
+        HAVING ABS(SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0)
+                   - i.quantity_in_stock) > 5
+        ORDER BY ABS(SUM(b.quantity_received) - COALESCE(SUM(t.quantity_sold),0)
+                     - i.quantity_in_stock) DESC
+        LIMIT 10
+    """, get_engine(), params=params if params else None)
 
     if df.empty:
         return "✅ Stock reconciliation is clean — no significant discrepancies found."
@@ -1684,8 +1627,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             chatbot = gr.Chatbot(
                 label="Pharmacy Assistant",
                 height=460,
-                autoscroll=True,
-                type="messages"   # use messages format (dicts)
+                autoscroll=True
             )
             brief_box = gr.Textbox(
                 label="💡 Key Points",
