@@ -1837,98 +1837,385 @@ FAREWELL_RESPONSE = "Goodbye! Come back anytime you need help. 👋"
 
 
 
-def route_and_respond(question, conversation_history=None):
-    """
-    Central router using GPT tool-calling for intent + parameter extraction.
-    GPT decides WHAT to query and WITH WHAT PARAMETERS.
-    Python executes SQL to get ACTUAL data — zero hallucination on figures.
-    """
-    # Fuzzy correct drug name spelling
-    correction_note = None
-    corrected_q, correction_note = fuzzy_correct_question(question)
+def to_text(value):
+    """Normalize any chat/state value into safe plain text before .lower(), regex, etc."""
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return to_text(value.get("content", ""))
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(to_text(v) for v in value)
+    return str(value)
 
-    # Get intent + parameters from GPT
-    result = classify_intent_with_tools(corrected_q, conversation_history)
+def qnorm(value):
+    return re.sub(r"\s+", " ", to_text(value).lower().strip())
+
+def natural_welcome(user_text=""):
+    q = qnorm(user_text)
+    if "good morning" in q:
+        opener = "Good morning"
+    elif "good afternoon" in q:
+        opener = "Good afternoon"
+    elif "good evening" in q:
+        opener = "Good evening"
+    else:
+        opener = "Hello"
+    return f"""{opener} — I’m the **Sunrise Pharmacy Assistant**.
+
+I can help with **stock checks, prices, low-stock alerts, expiry batches, sales, suppliers, forecasts, and medicine information**.
+
+Try asking: *"Do we have amoxicillin?"*, *"Which batches expire soon?"*, or *"What interacts with metformin?"*"""
+
+THANKS_RESPONSE = "You're welcome! Feel free to ask anytime. 😊"
+FAREWELL_RESPONSE = "Goodbye! Come back anytime you need help. 👋"
+OUT_OF_SCOPE_RESPONSE = (
+    "I’m focused on Sunrise Pharmacy operations, so I’m best at helping with "
+    "stock, prices, expiry batches, sales, suppliers, forecasts, and medicine information.\n\n"
+    "Try asking: *\"Which drugs are running low?\"* or *\"What interacts with metformin?\"*"
+)
+
+def is_out_of_scope(q):
+    q = qnorm(q)
+    if q in {"???", "??", "asdf", "asdasdasd", "asdfghjkl"}:
+        return True
+    return any(p in q for p in [
+        "joke", "weather", "world cup", "football", "soccer", "president",
+        "dance", "sing", "movie", "song", "recipe", "restaurant", "bitcoin",
+        "stock market", "lottery", "capital of"
+    ])
+
+def resolve_drug_name(text):
+    """Prefer exact generic/brand matches before partial/fuzzy matches."""
+    raw = to_text(text)
+    clean = re.sub(r"[^a-zA-Z0-9/\-\s]", " ", raw).strip().lower()
+    clean = re.sub(r"\s+", " ", clean)
+    if not clean or DRUGS_DF.empty:
+        return None
+    df = DRUGS_DF.copy()
+    df["_g"] = df["generic_name"].astype(str).str.lower()
+    df["_b"] = df["brand_name"].astype(str).str.lower()
+    stop = set(STOPWORDS) | {
+        "ask", "about", "what", "check", "inventory", "stock", "available", "availability",
+        "left", "need", "for", "does", "when", "expire", "expires", "expiry", "batch", "batches",
+        "have", "has", "many", "next", "date", "tell", "more", "this", "that", "and", "how"
+    }
+    tokens = [t for t in clean.split() if t not in stop]
+    candidates = [clean] + tokens
+    for cand in candidates:
+        exact = df[(df["_g"] == cand) | (df["_b"] == cand)]
+        if not exact.empty:
+            return exact.iloc[0]["generic_name"]
+    for cand in candidates:
+        if not cand:
+            continue
+        starts = df[df["_g"].str.startswith(cand) | df["_b"].str.startswith(cand)]
+        if not starts.empty:
+            starts = starts.assign(_len=starts["generic_name"].astype(str).str.len()).sort_values("_len")
+            return starts.iloc[0]["generic_name"]
+    for cand in candidates:
+        if not cand:
+            continue
+        contains = df[df["_g"].str.contains(re.escape(cand), na=False) | df["_b"].str.contains(re.escape(cand), na=False)]
+        if not contains.empty:
+            contains = contains.assign(_len=contains["generic_name"].astype(str).str.len()).sort_values("_len")
+            return contains.iloc[0]["generic_name"]
+    best_score, best_name = 0, None
+    for cand in candidates:
+        if len(cand) < 4:
+            continue
+        for _, row in df.iterrows():
+            for col in ["_g", "_b"]:
+                score = SequenceMatcher(None, cand, row[col]).ratio() * 100
+                if score > best_score:
+                    best_score = score
+                    best_name = row["generic_name"]
+    return best_name if best_score >= 78 else None
+
+def last_user_question(conversation_history):
+    for turn in reversed(conversation_history or []):
+        if isinstance(turn, dict) and turn.get("role") == "user":
+            return to_text(turn.get("content"))
+    return ""
+
+def last_assistant_answer(conversation_history):
+    for turn in reversed(conversation_history or []):
+        if isinstance(turn, dict) and turn.get("role") == "assistant":
+            return to_text(turn.get("content"))
+    return ""
+
+def infer_last_context(conversation_history):
+    last_a = last_assistant_answer(conversation_history)
+    last_u = last_user_question(conversation_history)
+    text = qnorm(last_a + " " + last_u)
+    ctx = {"intent": None, "drug": resolve_drug_name(last_u) or resolve_drug_name(last_a), "day": None}
+    for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+        if day in text:
+            ctx["day"] = day
+            break
+    if "batch records" in text or "expiry" in text or "expires" in text:
+        ctx["intent"] = "expiry"
+    elif "transaction records" in text or "selling drugs" in text or "sales" in text or ctx["day"]:
+        ctx["intent"] = "sales"
+    elif "supplier knowledge graph" in text or "supplier" in text or "lead time" in text:
+        ctx["intent"] = "supplier"
+    elif "drug interaction knowledge graph" in text or "interacts" in text or "interaction" in text:
+        ctx["intent"] = "interaction"
+    elif "inventory database" in text or "stock" in text or "shelf location" in text:
+        ctx["intent"] = "stock_price"
+    elif "drug knowledge graph" in text:
+        ctx["intent"] = "drug_info"
+    return ctx
+
+def format_stock_depletion_forecast():
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("""
+            SELECT i.generic_name, i.brand_name, i.quantity_in_stock,
+                   COALESCE(ROUND(SUM(t.quantity_sold)::numeric/30,2), 0) AS avg_daily,
+                   i.selling_price_usd
+            FROM inventory i LEFT JOIN transactions t ON i.product_id = t.product_id
+            GROUP BY i.product_id, i.generic_name, i.brand_name, i.quantity_in_stock, i.selling_price_usd
+            ORDER BY (i.quantity_in_stock * i.selling_price_usd) DESC LIMIT 10
+        """, conn)
+    finally:
+        release_conn(conn)
+    lines = ["## 📦 Stock Depletion Forecast\n", "| Drug | Brand | Stock | Avg Daily Sales | Days Remaining |", "|---|---|---|---|---|"]
+    for _, r in df.iterrows():
+        if r['avg_daily'] and r['avg_daily'] > 0:
+            days = round(r['quantity_in_stock'] / r['avg_daily'])
+            flag = "🔴" if days < 30 else ("🟡" if days < 60 else "🟢")
+            lines.append(f"| {r['generic_name']} | {r['brand_name']} | {r['quantity_in_stock']} | {r['avg_daily']}/day | {flag} **{days} days** |")
+        else:
+            lines.append(f"| {r['generic_name']} | {r['brand_name']} | {r['quantity_in_stock']} | No sales | ∞ |")
+    return "\n".join(lines)
+
+def _normalize_chat_for_messages(chat_history):
+    """Return clean Gradio message-format history and remove blank turns."""
+    messages = []
+    for item in list(chat_history or []):
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            role = item.get("role", "assistant")
+            if role not in {"user", "assistant", "system"}:
+                role = "assistant"
+            content = to_text(item.get("content", "")).strip()
+            if content:
+                messages.append({"role": role, "content": content})
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            user_text = to_text(item[0]).strip()
+            assistant_text = to_text(item[1]).strip()
+            if user_text:
+                messages.append({"role": "user", "content": user_text})
+            if assistant_text:
+                messages.append({"role": "assistant", "content": assistant_text})
+        else:
+            content = to_text(item).strip()
+            if content:
+                messages.append({"role": "assistant", "content": content})
+    return messages
+
+def _conversation_history_from_chat(chat_history):
+    return _normalize_chat_for_messages(chat_history)
+
+def _safe_memory(memory_context):
+    """Normalize the explicit conversation memory state used for follow-ups."""
+    if not isinstance(memory_context, dict):
+        memory_context = {}
+    return {
+        "last_intent": to_text(memory_context.get("last_intent", "")),
+        "last_drug": to_text(memory_context.get("last_drug", "")),
+        "last_day": to_text(memory_context.get("last_day", "")),
+        "last_topic": to_text(memory_context.get("last_topic", "")),
+        "last_question": to_text(memory_context.get("last_question", "")),
+    }
+
+def _day_in_text(text):
+    q = qnorm(text)
+    for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+        if day in q:
+            return day
+    return ""
+
+def _is_followup_question(question, memory_context):
+    q = qnorm(question)
+    mem = _safe_memory(memory_context)
+    if not mem.get("last_intent"):
+        return False
+    if any(x in q for x in [
+        "what about", "how about", "and ", "tell me more", "explain further",
+        "more about", "elaborate", "this", "that", "these", "those",
+        "of these", "of those", "same list", "only top", "i meant"
+    ]):
+        return True
+    # Very short day follow-ups such as "Friday?" after sales.
+    if mem.get("last_intent") == "sales" and _day_in_text(q) and len(q.split()) <= 4:
+        return True
+    return False
+
+def _remember_after_turn(memory_context, question, intent, answer, source):
+    mem = _safe_memory(memory_context)
+    q = qnorm(question)
+    drug = resolve_drug_name(question) or mem.get("last_drug", "")
+    day = _day_in_text(question) or mem.get("last_day", "")
+
+    normalized_intent = intent
+    if intent in {"low_stock", "reorder", "stats"}:
+        normalized_intent = "stock_price"
+    if intent == "briefing":
+        normalized_intent = "briefing"
+    if intent == "forecast":
+        normalized_intent = "forecast"
+
+    # Use source/answer as a safety net when the intent was unknown or follow-up.
+    source_text = qnorm(source + " " + answer[:300])
+    if intent in {"followup", "unknown"}:
+        if "batch" in source_text or "expiry" in source_text or "expires" in source_text:
+            normalized_intent = "expiry"
+        elif "transaction" in source_text or "sales" in source_text or "selling" in source_text:
+            normalized_intent = "sales"
+        elif "supplier" in source_text or "lead time" in source_text:
+            normalized_intent = "supplier"
+        elif "interaction" in source_text:
+            normalized_intent = "interaction"
+        elif "inventory" in source_text or "stock" in source_text:
+            normalized_intent = "stock_price"
+        elif "drug knowledge" in source_text:
+            normalized_intent = "drug_info"
+
+    # If user asked a clinical interaction, keep the main drug for "tell me more".
+    if normalized_intent == "interaction" and not drug:
+        drug = mem.get("last_drug", "")
+
+    return {
+        "last_intent": to_text(normalized_intent),
+        "last_drug": to_text(drug),
+        "last_day": to_text(day),
+        "last_topic": to_text(source),
+        "last_question": to_text(question),
+    }
+
+def handle_followup_with_memory(question, memory_context, conversation_history):
+    """Deterministic follow-up handler independent of Gradio chatbot internals."""
+    q = qnorm(question)
+    mem = _safe_memory(memory_context)
+    last_intent = mem.get("last_intent")
+    last_drug = mem.get("last_drug")
+
+    # Day-of-week follow-ups: "And Friday?"
+    day = _day_in_text(question)
+    if day and (last_intent == "sales" or q.startswith("and") or q.endswith("?")):
+        return format_sales(day), "transaction records", "operational", "sales"
+
+    # "top 3 of these" should reuse the previous result type.
+    nums = re.findall(r"\b(\d+)\b", q)
+    n = nums[0] if nums else "3"
+    if any(x in q for x in ["of these", "of those", "same list", "only top", "i meant"]):
+        if last_intent == "expiry" or "expir" in q:
+            return format_expiry(f"show next {n} expiries"), "batch records", "operational", "expiry"
+        if last_intent == "sales":
+            return format_sales(f"top {n} selling drugs"), "transaction records", "operational", "sales"
+        if last_intent == "stock_price":
+            return format_low_stock(f"top {n}"), "inventory database", "operational", "stock_price"
+
+    # "What about X?" follows the prior domain if possible; otherwise stock is safest.
+    if any(x in q for x in ["what about", "how about", "and "]):
+        drug = resolve_drug_name(question) or last_drug
+        if not drug:
+            return "I’m not sure which medicine you mean. Please name the drug directly.", "system", "system", last_intent or "unknown"
+        if last_intent == "expiry":
+            return format_expiry(f"when does {drug} expire"), "batch records", "operational", "expiry"
+        if last_intent == "supplier":
+            return format_supplier(f"who supplies {drug}"), "supplier knowledge graph", "operational", "supplier"
+        if last_intent == "interaction":
+            data = query_neo4j_interaction(drug)
+            answer = generate_clinical_answer(f"What interactions involve {drug}?", "interaction", "drug interaction knowledge graph", data, conversation_history)
+            return answer, "drug interaction knowledge graph", "clinical", "interaction"
+        if last_intent == "drug_info":
+            data = query_neo4j_drug_info(drug)
+            answer = generate_clinical_answer(f"Tell me about {drug}", "drug_info", "drug knowledge graph", data, conversation_history)
+            return answer, "drug knowledge graph", "clinical", "drug_info"
+        return format_stock_price(f"check stock for {drug}"), "inventory database", "operational", "stock_price"
+
+    # "Tell me more" / "explain further".
+    if any(x in q for x in ["tell me more", "explain further", "more about", "elaborate", "this", "that"]):
+        drug = resolve_drug_name(question) or last_drug
+        if last_intent == "interaction" and drug:
+            data = query_neo4j_interaction(drug)
+            answer = generate_clinical_answer(
+                f"Explain the interaction details, severity, and monitoring recommendations for {drug}",
+                "interaction",
+                "drug interaction knowledge graph",
+                data,
+                conversation_history,
+            )
+            return answer, "drug interaction knowledge graph", "clinical", "interaction"
+        if drug:
+            data = query_neo4j_drug_info(drug)
+            answer = generate_clinical_answer(f"Tell me more about {drug}", "drug_info", "drug knowledge graph", data, conversation_history)
+            return answer, "drug knowledge graph", "clinical", "drug_info"
+        return "I can explain further if you mention the medicine or topic you mean.", "system", "system", last_intent or "unknown"
+
+    return "I’m not sure what you want me to continue from. Please rephrase or name the medicine directly.", "system", "system", last_intent or "unknown"
+
+
+
+
+def route_and_respond(question, conversation_history=None):
+    question = to_text(question)
+    q = qnorm(question)
+    conversation_history = conversation_history or []
+    result = classify_intent_with_tools(question, conversation_history)
     tool   = result["tool"]
     params = result["params"]
-
-    def _wrap(answer):
-        return f"{correction_note}\n\n{answer}" if correction_note else answer
-
-    # ── System responses ───────────────────────────────────────
-    if tool == "greeting":
-        return get_greeting_response(question), "", "system"
-    if tool == "thanks":
-        return THANKS_RESPONSE, "", "system"
-    if tool == "farewell":
-        return FAREWELL_RESPONSE, "", "system"
-    if tool == "drug_summary":
-        return _wrap(format_drug_summary(params.get("drug_name", ""))), "inventory + batch records", "operational"
-
-    # ── Operational tool executors ─────────────────────────────
-    if tool == "query_inventory":
-        return _wrap(execute_query_inventory(params)), "inventory database", "operational"
-
-    if tool == "query_sales":
-        return _wrap(execute_query_sales(params)), "transaction records", "operational"
-
-    if tool == "query_expiry":
-        return _wrap(execute_query_expiry(params)), "batch records", "operational"
-
-    if tool == "query_supplier":
-        return _wrap(execute_query_supplier(params)), "supplier knowledge graph", "operational"
-
-    if tool == "query_stats":
-        return _wrap(format_stats()), "inventory database", "operational"
-
-    if tool == "query_briefing":
+    intent = tool
+    if tool == "greeting" or intent == "greeting":
+        return natural_welcome(question), "system", "system"
+    if intent == "thanks":
+        return THANKS_RESPONSE, "system", "system"
+    if intent == "farewell":
+        return FAREWELL_RESPONSE, "system", "system"
+    if intent == "out_of_scope":
+        return OUT_OF_SCOPE_RESPONSE, "system", "system"
+    if intent == "unknown":
+        return "I’m not sure I understood that request. Please ask about stock, expiry dates, sales, suppliers, forecasts, or medicine information.", "system", "system"
+    if intent == "followup":
+        return handle_followup(question, conversation_history)
+    if tool in ("stock_price","query_inventory"):
+        return execute_query_inventory(params), "inventory database", "operational"
+    if intent == "category_browse":
+        return format_category_browse(question), "inventory database", "operational"
+    if tool in ("stats","query_stats"):
+        return format_stats(), "inventory database", "operational"
+    if intent == "low_stock":
+        return format_low_stock(question), "inventory database", "operational"
+    if tool in ("expiry","query_expiry"):
+        return execute_query_expiry(params), "batch records", "operational"
+    if tool in ("sales","query_sales"):
+        return execute_query_sales(params), "transaction records", "operational"
+    if tool in ("supplier","query_supplier"):
+        return execute_query_supplier(params), "supplier knowledge graph", "operational"
+    if tool in ("alternative","query_alternatives"):
+        return format_alternative(params.get("drug_name",question)), "inventory database", "operational"
+    if intent == "briefing":
         return format_daily_briefing(), "inventory + batch + transaction records", "operational"
-
-    if tool == "query_reorder":
+    if intent == "reorder":
         return format_reorder_list(), "inventory + transaction records", "operational"
-
-    if tool == "query_forecast":
+    if tool in ("forecast","query_forecast"):
+        if any(x in q for x in ["stock last","days of stock","run out","how long will stock"]):
+            return format_stock_depletion_forecast(), "inventory + transaction records", "operational"
         return format_revenue_forecast(), "inventory + transaction records", "operational"
-
-    if tool == "query_reconciliation":
-        drug = params.get("drug_name")
-        return _wrap(format_reconciliation(f"reconcile {drug}" if drug else "reconcile")), "inventory + batch + transaction records", "operational"
-
-    if tool == "query_alternatives":
-        return _wrap(format_alternative(params.get("drug_name", ""))), "inventory database", "operational"
-
-    # ── Clinical tool (Neo4j + GPT) ────────────────────────────
-    if tool == "query_clinical":
-        drug_name  = params.get("drug_name", "")
-        drug_name2 = params.get("drug_name_2")
-        query_type = params.get("query_type", "drug_info")
-        if query_type == "interaction":
-            if drug_name2:
-                data = format_multi_interaction(f"{drug_name} {drug_name2}")
-                if not data:
-                    data = query_neo4j_interaction(drug_name)
-            else:
-                data = query_neo4j_interaction(drug_name)
-            answer = generate_clinical_answer(
-                corrected_q, "interaction",
-                "drug interaction knowledge graph", data, conversation_history
-            )
-            return _wrap(answer), "drug interaction knowledge graph", "clinical"
-        else:
-            data   = query_neo4j_drug_info(drug_name)
-            answer = generate_clinical_answer(
-                corrected_q, "drug_info",
-                "drug knowledge graph", data, conversation_history
-            )
-            return _wrap(answer), "drug knowledge graph", "clinical"
-
-    # ── Fallback ───────────────────────────────────────────────
-    data   = query_neo4j_drug_info(corrected_q)
-    answer = generate_clinical_answer(
-        corrected_q, "drug_info", "drug knowledge graph", data, conversation_history
-    )
-    return _wrap(answer), "drug knowledge graph", "clinical"
-
+    if tool in ("reconciliation","query_reconciliation"):
+        drug=params.get("drug_name"); return format_reconciliation(f"reconcile {drug}" if drug else "reconcile"), "inventory + batch + transaction records", "operational"
+    if tool in ("interaction","query_clinical") and params.get("query_type","drug_info")=="interaction":
+        data = query_neo4j_interaction(params.get("drug_name",question))
+        answer = generate_clinical_answer(question, intent, "drug interaction knowledge graph", data, conversation_history)
+        return answer, "drug interaction knowledge graph", "clinical"
+    if tool in ("drug_info","query_clinical"):
+        data = query_neo4j_drug_info(params.get("drug_name",question))
+        answer = generate_clinical_answer(question, intent, "drug knowledge graph", data, conversation_history)
+        return answer, "drug knowledge graph", "clinical"
+    return "I’m not sure I understood that request. Please rephrase it as a pharmacy question.", "system", "system"
 
 
 def export_chat(chat_history):
@@ -1960,102 +2247,95 @@ def filter_drugs(search_text):
     return gr.update(choices=matches if matches else DRUG_NAMES[:20])
 
 # ── Core respond function ─────────────────────────────────────
-def respond(message, chat_history, search_history):
-    if not message or message.strip() == "":
-        return "", chat_history, search_history, gr.update(), gr.update()
+def respond(message, chat_history, search_history, memory_context=None):
+    msg_text = to_text(message).strip()
+    chat_messages = _normalize_chat_for_messages(chat_history)
+    mem = _safe_memory(memory_context)
 
-    conversation_history = [
-        {"role": t["role"], "content": t["content"]}
-        for t in (chat_history or [])
-    ]
+    if not msg_text:
+        history_md = "\n".join([f"- {h}" for h in list(search_history or [])]) or "*No searches yet*"
+        return "", chat_messages, list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
+
+    conversation_history = _conversation_history_from_chat(chat_messages)
+    corrected_message = msg_text
+    correction_note = ""
+    answer = ""
+    source = "system"
+    mode = "system"
+    intent = "unknown"
 
     try:
-        answer, source, mode = route_and_respond(message, conversation_history)
+        corrected_message, correction_note = fuzzy_correct_question(msg_text)
 
-        if mode == "system":
-            full_answer = answer
-        elif mode == "operational":
-            header = f"*📦 Operational data — {source}*\n\n" if source else ""
-            full_answer = f"{header}{answer}"
-        else:  # clinical
-            header = f"*🧪 Clinical data — {source}*\n\n" if source else ""
-            full_answer = f"{header}{answer}"
+        if _is_followup_question(corrected_message, mem):
+            answer, source, mode, intent = handle_followup_with_memory(corrected_message, mem, conversation_history)
+        else:
+            # Do not let old chatbot internals decide follow-up; explicit memory handles that.
+            answer, source, mode = route_and_respond(corrected_message, [])
+
+        full_answer = _format_full_answer(answer, source, mode, correction_note)
+        mem = _remember_after_turn(mem, corrected_message, intent, answer, source)
 
     except Exception as e:
-        full_answer = f"An error occurred: {str(e)}\nPlease try rephrasing your question."
+        import traceback
+        print("Assistant error:\n" + traceback.format_exc())
+        full_answer = "I’m sorry — I couldn’t process that request safely. Please rephrase it or mention the medicine name directly."
+        # Keep prior memory instead of corrupting it.
 
-    chat_history = list(chat_history or [])
-    chat_history.append({"role": "user",      "content": message})
-    chat_history.append({"role": "assistant", "content": full_answer})
+    chat_messages.append({"role": "user", "content": msg_text})
+    chat_messages.append({"role": "assistant", "content": full_answer})
 
     search_history = list(search_history or [])
-    if message not in search_history:
-        search_history.insert(0, message)
+    if msg_text and msg_text not in search_history:
+        search_history.insert(0, msg_text)
     search_history = search_history[:15]
-    history_md = "\n".join([f"- {h}" for h in search_history])
+    history_md = "\n".join([f"- {h}" for h in search_history]) or "*No searches yet*"
 
-    return (
-        "",
-        chat_history,
-        search_history,
-        gr.update(choices=search_history, value=None),
-        gr.update(value=history_md),
-        ""  # clear brief_box on new question
-    )
+    return "", chat_messages, search_history, mem, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
 
-def drug_summary_respond(drug_name, chat_history, search_history):
+
+def drug_summary_respond(drug_name, chat_history, search_history, memory_context=None):
+    mem = _safe_memory(memory_context)
+    chat_messages = _normalize_chat_for_messages(chat_history)
     if not drug_name:
-        return chat_history, search_history, gr.update(), gr.update(), ""
+        history_md = "\n".join([f"- {h}" for h in list(search_history or [])]) or "*No searches yet*"
+        return chat_messages, list(search_history or []), mem, gr.update(), gr.update(value=history_md), ""
     try:
-        answer = format_drug_summary(drug_name)
-        header = "*📦 Operational data — inventory + batch records*\n\n"
-        full_answer = header + answer
-    except Exception as e:
-        full_answer = f"Error: {str(e)}"
-    label = f"Quick summary: {drug_name}"
-    chat_history = list(chat_history or [])
-    chat_history.append({"role": "user",      "content": label})
-    chat_history.append({"role": "assistant", "content": full_answer})
+        drug = to_text(drug_name)
+        answer = format_drug_summary(drug)
+        full_answer = "*📦 Operational data — inventory + batch records*\n\n" + answer
+        mem = _remember_after_turn(mem, f"Quick summary: {drug}", "stock_price", answer, "inventory + batch records")
+    except Exception:
+        import traceback
+        print("Drug summary error:\n" + traceback.format_exc())
+        full_answer = "I couldn’t retrieve that drug summary safely. Please try selecting the drug again."
+        drug = to_text(drug_name)
+
+    label = f"Quick summary: {drug}"
+    chat_messages.append({"role": "user", "content": label})
+    chat_messages.append({"role": "assistant", "content": full_answer})
+
     search_history = list(search_history or [])
     if label not in search_history:
         search_history.insert(0, label)
     search_history = search_history[:15]
-    history_md = "\n".join([f"- {h}" for h in search_history])
-    return (
-        chat_history,
-        search_history,
-        gr.update(choices=search_history, value=None),
-        gr.update(value=history_md),
-        ""  # clear brief_box
-    )
+    history_md = "\n".join([f"- {h}" for h in search_history]) or "*No searches yet*"
+    return chat_messages, search_history, mem, gr.update(choices=search_history, value=None), gr.update(value=history_md), ""
 
-def click_quick_question(question, chat_history, search_history):
-    return respond(question, chat_history, search_history)
 
-def reask_from_history(selected_question, chat_history, search_history):
-    if not selected_question:
-        return "", chat_history, search_history, gr.update(), gr.update(), ""
-    return respond(selected_question, chat_history, search_history)
+def _format_full_answer(answer, source, mode, correction_note=""):
+    if mode == "system":
+        return answer
+    if mode == "operational":
+        header = f"*📦 Operational data — {source}*\n\n"
+    else:
+        header = f"*🧪 Clinical data — {source}*\n\n"
+    return f"{correction_note}\n\n{header}{answer}" if correction_note else f"{header}{answer}"
 
-# ── Featured drugs & quick questions ─────────────────────────
-FEATURED_DRUGS = [
-    "Amoxicillin", "Paracetamol", "Metformin", "Ibuprofen",
-    "Ciprofloxacin", "Azithromycin", "Amlodipine", "Losartan",
-    "Artemether/Lumefantrine", "Co-trimoxazole"
-]
 
-QUICK_QUESTIONS = [
-    "Good morning",
-    "Which drugs are running low on stock?",
-    "Which batches are expiring soon?",
-    "What are the reorder list?",
-    "What are the top selling drugs?",
-    "Revenue forecast",
-    "Do we have amoxicillin in stock?",
-    "What interacts with metformin?"
-]
 
-# ── Gradio UI ─────────────────────────────────────────────────
+# ── Gradio UI
+
 with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     gr.HTML("""
@@ -2161,13 +2441,14 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     """)
 
     search_history_state = gr.State([])
+    memory_state = gr.State({})
 
     submit.click(respond,
-        [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+        [msg, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
     msg.submit(respond,
-        [msg, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+        [msg, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
 
     def transcribe_audio(audio_path, chat_history, search_history):
         if not audio_path:
@@ -2186,17 +2467,17 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             return "", chat_history, search_history, gr.update(), gr.update(), gr.update(value=None), ""
 
     audio_input.stop_recording(transcribe_audio,
-        [audio_input, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_input, brief_box])
+        [audio_input, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, audio_input, brief_box])
 
     history_dropdown.change(reask_from_history,
-        [history_dropdown, chatbot, search_history_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+        [history_dropdown, chatbot, search_history_state, memory_state],
+        [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
 
     for btn, question in zip(quick_btns, QUICK_QUESTIONS):
         btn.click(click_quick_question,
-            [gr.Textbox(value=question, visible=False), chatbot, search_history_state],
-            [msg, chatbot, search_history_state, history_dropdown, history_display, brief_box])
+            [gr.Textbox(value=question, visible=False), chatbot, search_history_state, memory_state],
+            [msg, chatbot, search_history_state, memory_state, history_dropdown, history_display, brief_box])
 
     # Drug chips removed
 
