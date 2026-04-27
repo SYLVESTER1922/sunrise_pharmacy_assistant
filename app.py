@@ -173,9 +173,11 @@ def fuzzy_correct_question(question):
     corrected_words = list(words)
     for i, word in enumerate(words):
         w = word.lower()
-        if len(w) < 4 or w in skip:
+        # Strip possessive 's so "metformin's" matches "metformin"
+        w_clean = re.sub(r"'s$|s'$", "", w)
+        if len(w_clean) < 4 or w_clean in skip:
             continue
-        match = fuzzy_match_drug(w, threshold=78)
+        match = fuzzy_match_drug(w_clean, threshold=78)
         if match and match.lower() != w:
             corrected_words[i] = match
             corrections.append(f"'{word}' → '{match}'")
@@ -475,14 +477,21 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
     batch_count_match = _re.search(r"(more than|at least|over|above|[0-9]+)\s+([0-9]+)?\s*batch", q_clean)
     batch_plain = any(p in q_clean for p in ["how many batches", "number of batches", "batch count"])
     if batch_count_match or batch_plain:
-        nums = _re.findall(r"[0-9]+", q_clean)
-        min_b = int(nums[0]) + 1 if batch_count_match and nums else (int(nums[0]) if nums else 2)
-        return {"tool": "query_expiry", "params": {"count_only": True, "min_batches": min_b}, "confidence": 1.0}
+        # Only count_only when NO specific drug mentioned
+        _kws = extract_keywords(q_clean)
+        _has_drug = any(fuzzy_match_drug(k, threshold=85) for k in _kws)
+        if not _has_drug:
+            nums = _re.findall(r"[0-9]+", q_clean)
+            min_b = int(nums[0]) + 1 if batch_count_match and nums else (int(nums[0]) if nums else 2)
+            return {"tool": "query_expiry", "params": {"count_only": True, "min_batches": min_b}, "confidence": 1.0}
     # "what about N batches" follow-up
     about_batch = _re.search(r"what about\s+([0-9]+)\s+batch", q_clean)
     if about_batch:
-        min_b = int(about_batch.group(1))
-        return {"tool": "query_expiry", "params": {"count_only": True, "min_batches": min_b}, "confidence": 1.0}
+        _kws2 = extract_keywords(q_clean)
+        _has_drug2 = any(fuzzy_match_drug(k, threshold=85) for k in _kws2)
+        if not _has_drug2:
+            min_b = int(about_batch.group(1))
+            return {"tool": "query_expiry", "params": {"count_only": True, "min_batches": min_b}, "confidence": 1.0}
 
     # ── Build context note for follow-up detection ──
     context = ""
@@ -1635,8 +1644,9 @@ def generate_clinical_answer(question, intent, source, data, conversation_histor
     if not data:
         if intent == "interaction":
             return (
-                "No interactions found for that drug in our knowledge base. "
-                "Please consult a clinical pharmacist or reference guide."
+                "No recorded interaction found between these drugs in our knowledge base. "
+                "This does not confirm safety — always verify with a clinical pharmacist "
+                "or a current drug interaction reference before dispensing."
                 + CLINICAL_DISCLAIMER
             )
         return (
