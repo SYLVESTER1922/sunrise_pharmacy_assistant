@@ -181,9 +181,11 @@ def fuzzy_correct_question(question):
         if len(w_clean) < 4 or w_clean in skip:
             continue
         match = fuzzy_match_drug(w_clean, threshold=78)
-        if match and match.lower() != w:
+        # Only flag as correction when neither the original word
+        # nor the possessive-stripped form already equals the match
+        if match and match.lower() != w and match.lower() != w_clean:
             corrected_words[i] = match
-            corrections.append(f"'{word}' → '{match}'")
+            corrections.append(f"'{word}' \u2192 '{match}'")
     corrected = " ".join(corrected_words)
     note = f"*(Auto-corrected: {', '.join(corrections)})*" if corrections else ""
     return corrected, note
@@ -1640,7 +1642,7 @@ Your ONLY job is to summarise that data clearly for pharmacy staff.
 
 ABSOLUTE RULES:
 1. Use ONLY the data provided below. Never add information from your training knowledge.
-2. If the data does not contain the answer, say exactly: "This information is not available in our knowledge base."
+2. If the data is empty or does not contain the answer: for interactions say "No recorded interaction found in our knowledge base. This does not confirm safety — verify with a pharmacist or drug reference." For other queries say "This information is not available in our knowledge base."
 3. Never invent, guess or infer drug names, doses, quantities, interactions or clinical facts.
 4. Never add interactions, contraindications or side effects not explicitly in the data.
 5. Keep the answer to 3-5 sentences. Be precise and factual.
