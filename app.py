@@ -2201,6 +2201,19 @@ def export_chat(chat_history):
 # ══════════════════════════════════════════════════════════════════
 
 with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
+.suggestion-radio label { cursor: pointer !important; }
+.suggestion-radio .wrap { gap: 4px !important; }
+.suggestion-radio input[type="radio"] { display: none !important; }
+.suggestion-radio .svelte-1gfkn6j, .suggestion-radio [data-testid="radio-item"] {
+    border-left: 3px solid #f97316 !important;
+    background: #fff8f0 !important;
+    padding: 8px 14px !important;
+    border-radius: 6px !important;
+    margin-bottom: 4px !important;
+    cursor: pointer !important;
+    width: 100% !important;
+    font-size: 13px !important;
+}
 .suggestion-btn {
     text-align: left !important;
     font-size: 13px !important;
@@ -2303,11 +2316,14 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
             suggestion_state = gr.State([])
             with gr.Column(visible=True) as suggestion_panel:
                 suggestion_label = gr.Markdown("", visible=False)
-                sug_btn_0 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
-                sug_btn_1 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
-                sug_btn_2 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
-                sug_btn_3 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
-                sug_btn_4 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
+                suggestion_radio = gr.Radio(
+                    choices=[],
+                    label="",
+                    value=None,
+                    visible=False,
+                    interactive=True,
+                    elem_classes=["suggestion-radio"]
+                )
 
             brief_box = gr.Textbox(label="💡 Key Points", placeholder="Ask a question, then click Brief", interactive=False, lines=2)
 
@@ -2336,22 +2352,19 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
     # ── State ────────────────────────────────────────────────────
     search_history_state = gr.State([])
     last_intent_ctx_state = gr.State({})
-    ALL_SUG_BTNS = [sug_btn_0, sug_btn_1, sug_btn_2, sug_btn_3, sug_btn_4]
+    # suggestion_radio replaces individual buttons
 
     # ── Helper to update suggestion buttons ──────────────────────
     def update_suggestion_buttons(suggestions):
-        """Return gr.update() for each of the 5 buttons + label."""
-        updates = []
+        """Return gr.update for the Radio + label."""
         if suggestions:
-            label_update = gr.update(value="### 💡 Did you mean one of these? Click any question below for a guaranteed accurate answer:", visible=True)
+            choices = [s[0] for s in suggestions]
+            label_update = gr.update(value="### 💡 Did you mean one of these? Click a question for a guaranteed answer:", visible=True)
+            radio_update = gr.update(choices=choices, value=None, visible=True)
         else:
             label_update = gr.update(value="", visible=False)
-        for i in range(5):
-            if i < len(suggestions):
-                updates.append(gr.update(value=suggestions[i][0], visible=True))
-            else:
-                updates.append(gr.update(value="", visible=False))
-        return [label_update] + updates
+            radio_update = gr.update(choices=[], value=None, visible=False)
+        return [label_update, radio_update]
 
     # ── Main submit handler ───────────────────────────────────────
     def handle_submit(message, chat_history, search_history, lang, last_intent_ctx):
@@ -2363,7 +2376,12 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
             cleared_msg, ch, sh, dd_upd, hist_upd, brief, suggestions = result
             new_ctx = last_intent_ctx
         btn_updates = update_suggestion_buttons(suggestions)
-        return [cleared_msg, ch, sh, dd_upd, hist_upd, brief, suggestions, new_ctx] + btn_updates
+        if len(btn_updates) == 2:
+            label_upd, radio_upd = btn_updates
+        else:
+            label_upd = gr.update(visible=False)
+            radio_upd = gr.update(choices=[], value=None, visible=False)
+        return [cleared_msg, ch, sh, dd_upd, hist_upd, brief, suggestions, new_ctx, label_upd, radio_upd]
 
     submit_outputs = [
         msg, chatbot, search_history_state,
@@ -2371,7 +2389,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
         suggestion_state,
         last_intent_ctx_state,
         suggestion_label,
-        sug_btn_0, sug_btn_1, sug_btn_2, sug_btn_3, sug_btn_4
+        suggestion_radio
     ]
 
     submit.click(handle_submit,
@@ -2404,7 +2422,12 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
                 ch, sh, dd_upd, hist_upd, brief, new_suggestions = result
                 new_ctx = {}
             btn_updates = update_suggestion_buttons(new_suggestions)
-            return [ch, sh, dd_upd, hist_upd, brief, new_suggestions, new_ctx] + btn_updates
+            if len(btn_updates) == 2:
+                label_upd, radio_upd = btn_updates
+            else:
+                label_upd = gr.update(visible=False)
+                radio_upd = gr.update(choices=[], value=None, visible=False)
+            return [ch, sh, dd_upd, hist_upd, brief, new_suggestions, new_ctx, label_upd, radio_upd]
         return handler
 
     sug_click_outputs = [
@@ -2413,13 +2436,36 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
         suggestion_state,
         last_intent_ctx_state,
         suggestion_label,
-        sug_btn_0, sug_btn_1, sug_btn_2, sug_btn_3, sug_btn_4
+        suggestion_radio
     ]
 
-    for i, btn in enumerate(ALL_SUG_BTNS):
-        btn.click(make_suggestion_handler(i),
-            [suggestion_state, chatbot, search_history_state, lang_state, last_intent_ctx_state],
-            sug_click_outputs)
+    # ── Radio selection handler ───────────────────────────────────
+    def handle_radio_select(selected_text, suggestions, chat_history, search_history, lang, last_ctx):
+        """Called when user clicks a suggestion in the Radio list."""
+        if not selected_text or not suggestions:
+            return [chat_history, search_history, gr.update(), gr.update(), "", suggestions, last_ctx, gr.update(visible=False), gr.update(choices=[], value=None, visible=False)]
+        # Find the matching suggestion by text
+        match = next((s for s in suggestions if s[0] == selected_text), None)
+        if not match:
+            return [chat_history, search_history, gr.update(), gr.update(), "", suggestions, last_ctx, gr.update(visible=False), gr.update(choices=[], value=None, visible=False)]
+        suggestion_text, intent_id, drug, n_val, day, category, city, month = match
+        result = execute_suggestion(suggestion_text, intent_id, drug, n_val, day, category, city, month, lang, chat_history, search_history)
+        if len(result) == 7:
+            ch, sh, dd_upd, hist_upd, brief, new_suggestions, new_ctx = result
+        else:
+            ch, sh, dd_upd, hist_upd, brief, new_suggestions = result
+            new_ctx = {}
+        btn_updates = update_suggestion_buttons(new_suggestions)
+        if len(btn_updates) == 2:
+            label_upd, radio_upd = btn_updates
+        else:
+            label_upd = gr.update(visible=False)
+            radio_upd = gr.update(choices=[], value=None, visible=False)
+        return [ch, sh, dd_upd, hist_upd, brief, new_suggestions, new_ctx, label_upd, radio_upd]
+
+    suggestion_radio.change(handle_radio_select,
+        [suggestion_radio, suggestion_state, chatbot, search_history_state, lang_state, last_intent_ctx_state],
+        sug_click_outputs)
 
     # ── Language toggle ───────────────────────────────────────────
     def set_lang_en():
@@ -2444,7 +2490,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
 
     audio_input.stop_recording(transcribe_audio,
         [audio_input, chatbot, search_history_state, lang_state],
-        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_input, brief_box, suggestion_state, suggestion_label, sug_btn_0, sug_btn_1, sug_btn_2, sug_btn_3, sug_btn_4])
+        [msg, chatbot, search_history_state, history_dropdown, history_display, audio_input, brief_box, suggestion_state, suggestion_label, suggestion_radio])
 
     # ── History re-ask ────────────────────────────────────────────
     def reask_from_history(selected_question, chat_history, search_history, lang):
@@ -2462,11 +2508,16 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
     def drug_lookup_handler(drug_name, chat_history, search_history, lang):
         ch, sh, dd, hist, brief, sug = drug_summary_respond(drug_name, chat_history, search_history, lang)
         btn_updates = update_suggestion_buttons(sug)
-        return [ch, sh, dd, hist, brief, sug] + btn_updates
+        if len(btn_updates) == 2:
+            label_upd, radio_upd = btn_updates
+        else:
+            label_upd = gr.update(visible=False)
+            radio_upd = gr.update(choices=[], value=None, visible=False)
+        return [ch, sh, dd, hist, brief, sug, label_upd, radio_upd]
 
     drug_lookup_btn.click(drug_lookup_handler,
         [drug_dropdown, chatbot, search_history_state, lang_state],
-        [chatbot, search_history_state, history_dropdown, history_display, brief_box, suggestion_state, suggestion_label, sug_btn_0, sug_btn_1, sug_btn_2, sug_btn_3, sug_btn_4])
+        [chatbot, search_history_state, history_dropdown, history_display, brief_box, suggestion_state, suggestion_label, suggestion_radio])
 
     # ── Export ────────────────────────────────────────────────────
     def do_export(chat_history):
