@@ -1847,9 +1847,10 @@ def route_and_respond(question: str, conversation_history=None):
 
         if query_type == "interaction":
             if drug_name2:
+                # Two-drug query — only look for their specific interaction
                 data = format_multi_interaction(f"{drug_name} {drug_name2}")
-                if not data:
-                    data = query_neo4j_interaction(drug_name)
+                # Do NOT fall back to single-drug interactions — that would
+                # return unrelated interactions and confuse GPT
             else:
                 data = query_neo4j_interaction(drug_name)
             answer = generate_clinical_answer(
