@@ -2089,8 +2089,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             chatbot = gr.Chatbot(
                 label="Pharmacy Assistant",
                 height=460,
-                autoscroll=True,
-                show_copy_button=True
+                autoscroll=True
             )
             brief_box = gr.Textbox(
                 label="💡 Key Points",
