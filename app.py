@@ -65,6 +65,13 @@ def get_driver():
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 
 driver = get_driver()
+# Pre-warm Neo4j connection at startup to avoid cold-start latency
+try:
+    with driver.session() as _s:
+        _s.run("RETURN 1")
+    print("Neo4j connection pre-warmed ✓")
+except Exception as _e:
+    print(f"Neo4j pre-warm failed (will retry on first query): {_e}")
 
 def run_cypher(cypher, params=None):
     """Run Cypher with auto-reconnect on stale connection."""
@@ -76,8 +83,13 @@ def run_cypher(cypher, params=None):
         except Exception:
             if attempt == 0:
                 driver = get_driver()
-            else:
-                raise
+# Pre-warm Neo4j connection at startup to avoid cold-start latency
+try:
+    with driver.session() as _s:
+        _s.run("RETURN 1")
+    print("Neo4j connection pre-warmed ✓")
+except Exception as _e:
+    print(f"Neo4j pre-warm failed (will retry on first query): {_e}")
 
 
 # ── OpenAI client ─────────────────────────────────────────────────
@@ -1921,7 +1933,11 @@ def respond(message, chat_history, search_history):
             header      = f"*📦 Operational data — {source}*\n\n" if source else ""
             full_answer = f"{header}{answer}"
         else:  # clinical
-            header      = f"*🧪 Clinical data — {source}*\n\n" if source else ""
+            # Don't double-add header if answer already starts with it
+            if source and not answer.lstrip().startswith("*🧪"):
+                header = f"*🧪 Clinical data — {source}*\n\n"
+            else:
+                header = ""
             full_answer = f"{header}{answer}"
 
     except Exception as e:
@@ -2009,6 +2025,22 @@ QUICK_QUESTIONS = [
 with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
 
     gr.HTML("""
+    <script>
+    function scrollChat() {
+        const chatbots = document.querySelectorAll('.chatbot, [class*="chatbot"]');
+        chatbots.forEach(el => { el.scrollTop = el.scrollHeight; });
+        const msgs = document.querySelectorAll('.message-wrap, .messages');
+        msgs.forEach(el => { el.scrollTop = el.scrollHeight; });
+    }
+    const obs = new MutationObserver(scrollChat);
+    document.addEventListener('DOMContentLoaded', () => {
+        const target = document.querySelector('.gradio-container');
+        if (target) obs.observe(target, {childList: true, subtree: true});
+        setInterval(scrollChat, 500);
+    });
+    </script>
+    """)
+    gr.HTML("""
     <div style="background: linear-gradient(135deg, #0d1b2a, #1a3a5c);
                 padding: 16px 24px; border-radius: 10px; margin-bottom: 16px;
                 display: flex; align-items: center; justify-content: space-between;">
@@ -2057,7 +2089,8 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
             chatbot = gr.Chatbot(
                 label="Pharmacy Assistant",
                 height=460,
-                autoscroll=True
+                autoscroll=True,
+                show_copy_button=True
             )
             brief_box = gr.Textbox(
                 label="💡 Key Points",
