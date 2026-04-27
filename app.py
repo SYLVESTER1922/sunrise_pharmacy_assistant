@@ -2201,7 +2201,29 @@ def export_chat(chat_history):
 # ══════════════════════════════════════════════════════════════════
 
 with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
-.suggestion-btn { text-align: left !important; font-size: 13px !important; }
+.suggestion-btn {
+    text-align: left !important;
+    font-size: 13px !important;
+    width: 100% !important;
+    display: block !important;
+    padding: 8px 14px !important;
+    margin-bottom: 4px !important;
+    border-radius: 6px !important;
+    border-left: 3px solid #f97316 !important;
+    background: #fff8f0 !important;
+    color: #1a1a1a !important;
+    font-weight: normal !important;
+    white-space: normal !important;
+    height: auto !important;
+    min-height: 36px !important;
+    line-height: 1.4 !important;
+    overflow: visible !important;
+    word-wrap: break-word !important;
+}
+.suggestion-btn:hover {
+    background: #fff0e0 !important;
+    border-left-color: #ea6c00 !important;
+}
 .caution-box { background: #fff3cd; border-left: 4px solid #ffc107; padding: 8px 12px; border-radius: 4px; }
 .lang-btn { min-width: 100px !important; }
 """) as demo:
@@ -2281,14 +2303,11 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
             suggestion_state = gr.State([])
             with gr.Column(visible=True) as suggestion_panel:
                 suggestion_label = gr.Markdown("", visible=False)
-                with gr.Row():
-                    sug_btn_0 = gr.Button("", visible=False, variant="secondary", size="sm", elem_classes=["suggestion-btn"])
-                    sug_btn_1 = gr.Button("", visible=False, variant="secondary", size="sm", elem_classes=["suggestion-btn"])
-                with gr.Row():
-                    sug_btn_2 = gr.Button("", visible=False, variant="secondary", size="sm", elem_classes=["suggestion-btn"])
-                    sug_btn_3 = gr.Button("", visible=False, variant="secondary", size="sm", elem_classes=["suggestion-btn"])
-                with gr.Row():
-                    sug_btn_4 = gr.Button("", visible=False, variant="secondary", size="sm", elem_classes=["suggestion-btn"])
+                sug_btn_0 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
+                sug_btn_1 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
+                sug_btn_2 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
+                sug_btn_3 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
+                sug_btn_4 = gr.Button("", visible=False, variant="secondary", elem_classes=["suggestion-btn"])
 
             brief_box = gr.Textbox(label="💡 Key Points", placeholder="Ask a question, then click Brief", interactive=False, lines=2)
 
@@ -2324,7 +2343,7 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant", css="""
         """Return gr.update() for each of the 5 buttons + label."""
         updates = []
         if suggestions:
-            label_update = gr.update(value="💡 **Did you mean one of these?** Click to get a guaranteed answer:", visible=True)
+            label_update = gr.update(value="### 💡 Did you mean one of these? Click any question below for a guaranteed accurate answer:", visible=True)
         else:
             label_update = gr.update(value="", visible=False)
         for i in range(5):
