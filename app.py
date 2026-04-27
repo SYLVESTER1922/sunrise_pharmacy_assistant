@@ -174,7 +174,10 @@ def fuzzy_correct_question(question):
     for i, word in enumerate(words):
         w = word.lower()
         # Strip possessive 's so "metformin's" matches "metformin"
-        w_clean = re.sub(r"[\u2019']s$", "", w)
+        # Strip possessive: 'metformin's' → apostrophe already removed → 'metformins'
+        # So strip trailing 's' if base word matches a drug
+        w_clean = w[:-1] if w.endswith('s') and fuzzy_match_drug(w[:-1], threshold=90) else w
+        w_clean = re.sub(r"[\u2019']s$", "", w_clean)
         if len(w_clean) < 4 or w_clean in skip:
             continue
         match = fuzzy_match_drug(w_clean, threshold=78)
@@ -477,10 +480,15 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
     batch_count_match = _re.search(r"(more than|at least|over|above|[0-9]+)\s+([0-9]+)?\s*batch", q_clean)
     batch_plain = any(p in q_clean for p in ["how many batches", "number of batches", "batch count"])
     if batch_count_match or batch_plain:
-        # Only count_only when NO specific drug mentioned
         _kws = extract_keywords(q_clean)
-        _has_drug = any(fuzzy_match_drug(k, threshold=85) for k in _kws)
-        if not _has_drug:
+        _drug_hit = next(
+            (fuzzy_match_drug(k, threshold=85) for k in _kws
+             if fuzzy_match_drug(k, threshold=85)),
+            None
+        )
+        if _drug_hit:
+            return {"tool": "query_expiry", "params": {"drug_name": _drug_hit}, "confidence": 1.0}
+        else:
             nums = _re.findall(r"[0-9]+", q_clean)
             min_b = int(nums[0]) + 1 if batch_count_match and nums else (int(nums[0]) if nums else 2)
             return {"tool": "query_expiry", "params": {"count_only": True, "min_batches": min_b}, "confidence": 1.0}
@@ -533,6 +541,8 @@ def classify_intent_with_tools(question: str, conversation_history=None) -> dict
         "For 'now show bottom N', 'now show top N', 'flip to bottom' — keep the same sort_by metric from context, only change direction. "
         "For 'how much this month', 'revenue this month', 'monthly revenue' — use query_sales with period=last_week (best available approximation). "
         "For clearly clinical questions about a named drug (molecular weight, mechanism of action, pharmacokinetics) — use query_clinical even if the data may not be in the knowledge base. "
+        "For 'is it safe with X', 'can it be combined with X', 'safe together' "
+        "— use query_clinical with query_type=interaction and both drug names. "
         "For questions completely unrelated to pharmacy (weather, sports, politics, personal) "
         "do NOT call any tool — respond with no tool_call."
     )
