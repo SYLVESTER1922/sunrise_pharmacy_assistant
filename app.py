@@ -174,7 +174,7 @@ def fuzzy_correct_question(question):
     for i, word in enumerate(words):
         w = word.lower()
         # Strip possessive 's so "metformin's" matches "metformin"
-        w_clean = re.sub(r"'s$|s'$", "", w)
+        w_clean = re.sub(r"[\u2019']s$", "", w)
         if len(w_clean) < 4 or w_clean in skip:
             continue
         match = fuzzy_match_drug(w_clean, threshold=78)
