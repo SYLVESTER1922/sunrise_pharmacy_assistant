@@ -239,17 +239,25 @@ class Entities:
 def _fuzzy_match_drug(text: str, threshold: int = 78) -> str | None:
     """Return the best-matching drug generic name, or None."""
     text = re.sub(r"['\u2019\u2018`]", "", text.lower().strip())
-    # Exact generic
+    if len(text) < 3: return None
+    # 1. Exact generic
     for d in DRUG_NAMES:
         if text == d.lower(): return d
-    # Exact brand → generic
+    # 2. Exact brand → generic
     if text in BRAND_TO_GENERIC: return BRAND_TO_GENERIC[text]
-    # Fuzzy generic
+    # 3. Substring match on generic names (handles compound names like Abacavir/Lamivudine)
+    #    Only match if query is meaningful length (≥5 chars) to avoid false positives
+    if len(text) >= 5:
+        for d in DRUG_NAMES:
+            if text in d.lower(): return d
+        for brand, generic in BRAND_TO_GENERIC.items():
+            if text in brand: return generic
+    # 4. Fuzzy on generic names
     best_s, best_m = 0, None
     for d in DRUG_NAMES:
         s = SequenceMatcher(None, text, d.lower()).ratio() * 100
         if s > best_s: best_s, best_m = s, d
-    # Fuzzy brand → generic
+    # 5. Fuzzy on brand names
     for brand, generic in BRAND_TO_GENERIC.items():
         s = SequenceMatcher(None, text, brand).ratio() * 100
         if s > best_s: best_s, best_m = s, generic
@@ -437,6 +445,15 @@ DETERMINISTIC_RULES = [
         ("full summary","drug profile","fiche","résumé","profil","summary","profile","detail",
          "information on","info on","tell me about","about","overview")),
      "drug_summary", 1.0),
+
+    # ── Expiry — first_expiry MUST come before sales rules ───────────
+    # "which drug expires first" has "first" + "drug" + "expire"
+    # If sales rules run first, "first" matches worst_sellers group_a
+    # and "drug" matches group_b → wrong answer
+    (lambda q,e: _concept(q,
+        ("first","nearest","soonest","closest","premier","plus proche","prochain","next"),
+        ("expir","expire","expiry","expiration","périm","péremption")),
+     "first_expiry", 1.0),
 
     # ── Sales ──────────────────────────────────────────────────────
     # Worst/slowest sellers — word-cluster approach catches all variations
@@ -1684,7 +1701,9 @@ def get_greeting_response(question: str = "", lang: str = "en") -> str:
 def _last_intent_context(history: list) -> dict:
     """
     Scan last assistant message to extract last intent + drug.
-    Used to resolve follow-up references like "what about X?" or "tell me more".
+    Patterns are ordered most-specific first to avoid false matches.
+    e.g. a supplier card contains "Lead Time" and "In Stock" —
+    supplier patterns must be checked before stock patterns.
     """
     ctx = {"intent": "", "drug": ""}
     if not history:
@@ -1693,28 +1712,49 @@ def _last_intent_context(history: list) -> dict:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
         content = str(msg.get("content", "")).lower()
-        # Detect intent from response content patterns
-        if "supplier for" in content or "lead time" in content:
+
+        # ── Most-specific patterns first ────────────────────────────
+        # Supplier card: has both "supplier" label AND "payment terms" row
+        if "payment terms" in content and "lead time" in content:
             ctx["intent"] = "supplier_drug"
-        elif "suppliers by lead time" in content and "fastest" in content:
-            ctx["intent"] = "fastest_supplier"
-        elif "suppliers by lead time" in content and "slowest" in content:
-            ctx["intent"] = "slowest_supplier"
+        # Supplier lead-time ranking table
+        elif "suppliers by lead time" in content:
+            ctx["intent"] = "fastest_supplier" if "fastest" in content else "slowest_supplier"
+        # Supplier city listing
+        elif "suppliers**" in content and "city" in content and "count" in content:
+            ctx["intent"] = "supplier_count"
+        # Sales rankings
         elif "selling drugs" in content and "bottom" in content:
             ctx["intent"] = "worst_sellers"
         elif "selling drugs" in content and "top" in content:
             ctx["intent"] = "top_sellers"
-        elif "batch" in content and "expir" in content:
+        # Expiry
+        elif "first to expire" in content:
+            ctx["intent"] = "first_expiry"
+        elif "batch" in content and "expir" in content and "days left" in content:
             ctx["intent"] = "expiry_drug"
-        elif "interaction" in content:
+        elif "batches expiring" in content or "expiry" in content:
+            ctx["intent"] = "expiry_soon"
+        # Clinical
+        elif "interaction" in content and "severity" in content:
             ctx["intent"] = "drug_interactions"
-        elif "reorder level" in content or "low stock" in content:
+        elif "side effect" in content or "adverse effect" in content:
+            ctx["intent"] = "side_effects"
+        elif "indication" in content or "used for" in content:
+            ctx["intent"] = "drug_info"
+        # Operational
+        elif "reorder level" in content and "⚠️" in content:
             ctx["intent"] = "low_stock"
-        elif "selling price" in content or "cost price" in content:
+        elif "procurement action" in content:
+            ctx["intent"] = "reorder_list"
+        elif "selling price" in content and "cost price" in content and "margin" in content:
             ctx["intent"] = "drug_price"
-        elif "in stock" in content or "stock |" in content:
+        # Stock check — only if none of the above matched
+        # (supplier cards also contain "in stock" so check this last)
+        elif ("in stock" in content or "reorder level" in content) and "payment terms" not in content:
             ctx["intent"] = "stock_check"
-        # Extract drug name
+
+        # Extract drug name from content
         for drug in DRUG_NAMES:
             if drug.lower() in content:
                 ctx["drug"] = drug
