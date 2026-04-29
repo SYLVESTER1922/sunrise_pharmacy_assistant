@@ -329,7 +329,30 @@ def _any(q: str, *phrases) -> bool:
     """True if any phrase appears in q."""
     return any(p in q for p in phrases)
 
-# Rules are evaluated in order — first match wins
+def _words(q: str, *words) -> bool:
+    """True if any of the individual words appear in the question."""
+    q_words = set(q.split())
+    return any(w in q_words or w in q for w in words)
+
+def _all_words(q: str, *words) -> bool:
+    """True if ALL words appear somewhere in the question."""
+    return all(w in q for w in words)
+
+def _concept(q: str, group_a: tuple, group_b: tuple = None) -> bool:
+    """
+    Concept-cluster match.
+    If group_b given: True if q contains at least one word from A AND one from B.
+    If group_b None: True if q contains at least one word from A.
+    """
+    has_a = any(w in q for w in group_a)
+    if group_b is None:
+        return has_a
+    has_b = any(w in q for w in group_b)
+    return has_a and has_b
+
+# Rules evaluated in order — first match wins.
+# Rules use _concept(q, group_a, group_b) for word-cluster matching
+# so natural language variations are handled without exhaustive phrase lists.
 DETERMINISTIC_RULES = [
     # ── Greetings / social ─────────────────────────────────────────
     (lambda q,e: any(q == t or q.startswith(t+" ") for t in GREETING_TRIGGERS),
@@ -344,125 +367,214 @@ DETERMINISTIC_RULES = [
      "drug_summary", 1.0),
 
     # ── Inventory ─────────────────────────────────────────────────
-    (lambda q,e: e.drug and _any(q,"in stock","do we have","avons-nous","en stock",
-                                    "stock level","niveau de stock","check stock",
-                                    "check inventory","vérifier le stock"),
+    # Drug price — must come before stock_check (also has e.drug)
+    (lambda q,e: e.drug and _concept(q,
+        ("price","cost","how much","coût","prix","combien","afford","cheap","expensive","coûte")),
+     "drug_price", 1.0),
+
+    (lambda q,e: e.drug and _concept(q,
+        ("in stock","do we have","avons-nous","en stock","stock level","niveau de stock",
+         "check stock","check inventory","vérifier","have we got","got any","carry")),
      "stock_check", 1.0),
-    (lambda q,e: _any(q,"running low","below reorder","low on stock","low stock",
-                         "critical stock","need restock","reorder level","stock faible",
-                         "réapprovisionner","rupture de stock","niveau bas"),
+
+    # Urgent restocking with specific count — must come before low_stock
+    (lambda q,e: e.number != 10 and _concept(q,
+        ("restock","restocking","reorder","order","urgent","needs","need","critical"),
+        ("drug","drugs","médicament","médicaments","item","items")),
      "low_stock", 1.0),
-    (lambda q,e: _any(q,"how many products","total inventory","inventory summary",
-                         "inventory value","total inventory value","how many drugs",
-                         "combien de produits","valeur du stock","résumé du stock"),
-     "inventory_summary", 1.0),
-    (lambda q,e: e.category and _any(q,"show me all","all drugs","list all",
-                                        "drugs we carry","montrer tous","liste de",
-                                        "tous les médicaments"),
+
+    (lambda q,e: _concept(q,
+        ("running low","below reorder","low on stock","low stock","critical stock",
+         "need restock","reorder level","stock faible","réapprovisionner",
+         "rupture","niveau bas","running out","out of stock","short on")),
+     "low_stock", 1.0),
+
+    # Category count: "how many antibiotics", "how many antifungals"
+    (lambda q,e: e.category and _concept(q,
+        ("how many","combien","count","number of","nombre de","do we have","avons-nous",
+         "carry","stock","have")),
+     "category_count", 1.0),
+
+    # Category browse: "show me all antibiotics", "list all analgesics"
+    (lambda q,e: e.category and _concept(q,
+        ("show","list","display","all","montrer","liste","afficher","tous","what")),
      "category_browse", 1.0),
-    (lambda q,e: _any(q,"cheapest","lowest price","most affordable","prix le plus bas",
-                         "moins cher","abordable"),
+
+    # Inventory counts: products, drugs, categories
+    (lambda q,e: _concept(q,
+        ("how many","combien","count","number of","nombre"),
+        ("products","drugs","categories","médicaments","produits","catégories","items","carry")),
+     "inventory_summary", 1.0),
+
+    (lambda q,e: _any(q,"total inventory","inventory summary","inventory value",
+                         "total inventory value","valeur du stock","résumé du stock"),
+     "inventory_summary", 1.0),
+
+    (lambda q,e: _concept(q,
+        ("cheapest","lowest price","most affordable","prix le plus bas","moins cher","abordable",
+         "cheapest drug","low cost","inexpensive")),
      "cheapest_drugs", 1.0),
-    (lambda q,e: _any(q,"most expensive","highest price","prix le plus élevé","plus cher"),
+
+    (lambda q,e: _concept(q,
+        ("most expensive","highest price","prix le plus élevé","plus cher","costliest",
+         "priciest","high cost")),
      "expensive_drugs", 1.0),
-    (lambda q,e: _any(q,"highest margin","most profitable","best margin","highest profit",
-                         "marge la plus élevée","plus rentable","meilleure marge"),
+
+    (lambda q,e: _concept(q,
+        ("highest margin","most profitable","best margin","highest profit",
+         "marge la plus élevée","plus rentable","meilleure marge","profit margin")),
      "highest_margin", 1.0),
-    (lambda q,e: e.drug and _any(q,"alternative","substitute","instead of","replace",
-                                    "alternatives pour","substitut","remplacer"),
+
+    # Alternatives — word-cluster: (replacement concept) + drug present
+    (lambda q,e: e.drug and _concept(q,
+        ("alternative","substitute","instead","replace","replacement","swap","give","use",
+         "in place","other option","another","alternatives","substitut","remplacer",
+         "place of","exchange","equivalent","instead of","what else")),
      "drug_alternatives", 1.0),
 
+    # Drug summary — explicit profile/summary request with drug
+    (lambda q,e: e.drug and _concept(q,
+        ("full summary","drug profile","fiche","résumé","profil","summary","profile","detail",
+         "information on","info on","tell me about","about","overview")),
+     "drug_summary", 1.0),
+
     # ── Sales ──────────────────────────────────────────────────────
-    (lambda q,e: _any(q,"top selling","best selling","most sold","best sellers",
-                         "meilleures ventes","plus vendu","meilleurs ventes"),
-     "top_sellers", 1.0),
-    (lambda q,e: _any(q,"least selling","worst selling","worst sellers","bottom sellers",
-                         "lowest sales","moins vendu","pires ventes","ventes les plus faibles"),
+    # Worst/slowest sellers — word-cluster approach catches all variations
+    (lambda q,e: _concept(q,
+        ("worst","least","slowest","bottom","lowest","poorly","slow","faible","pire","moins"),
+        ("selling","sold","moving","seller","sellers","drug","drugs","sales","vente","ventes",
+         "performer","revenue","unit","units")),
      "worst_sellers", 1.0),
-    (lambda q,e: _any(q,"yesterday","last day","hier","d'hier","ventes d'hier",
-                         "chiffre d'hier","revenu d'hier"),
+
+    # Top sellers
+    (lambda q,e: _concept(q,
+        ("top","best","highest","most","leading","meilleures","plus","premier"),
+        ("selling","sold","seller","sellers","sales","revenue","vente","ventes","drug","drugs")),
+     "top_sellers", 1.0),
+
+    (lambda q,e: _concept(q,
+        ("yesterday","last day","hier","d'hier","yest")),
      "yesterday_sales", 1.0),
-    (lambda q,e: _any(q,"this month","monthly revenue","month to date","revenue this month",
-                         "ce mois","revenu du mois","chiffre du mois","ce mois-ci"),
+
+    (lambda q,e: _concept(q,
+        ("this month","monthly","month to date","ce mois","revenue this month",
+         "revenu du mois","chiffre du mois","ce mois-ci","current month")),
      "this_month_sales", 1.0),
-    (lambda q,e: _any(q,"how many units","total units sold","units sold in total",
-                         "average daily revenue","avg daily revenue","overall sales summary",
-                         "combien d'unités","unités vendues","revenu journalier moyen",
-                         "résumé global des ventes"),
+
+    (lambda q,e: _concept(q,
+        ("how many units","total units","units sold","average daily","avg daily",
+         "overall sales","total sales","total revenue","combien d'unités","unités vendues",
+         "revenu journalier moyen","total transactions")),
      "total_summary", 1.0),
-    (lambda q,e: _any(q,"which day","best day","busiest day","highest revenue day",
-                         "day of the week","quel jour","jour le plus","meilleur jour"),
+
+    (lambda q,e: _concept(q,
+        ("which day","best day","busiest day","highest revenue day","day of the week",
+         "quel jour","jour le plus","meilleur jour","what day","peak day")),
      "best_day", 1.0),
-    (lambda q,e: e.day is not None and _any(q,"sales on","revenue on","what happened on",
-                                               "sales","ventes du","chiffre du",
-                                               "comment avons-nous performé"),
+
+    (lambda q,e: e.day is not None,
      "day_sales", 1.0),
-    (lambda q,e: _any(q,"customer type","by customer","walk-in","prescription","insurance",
-                         "par type de client","type de clientèle"),
+
+    (lambda q,e: _concept(q,
+        ("customer type","by customer","walk-in","prescription","insurance",
+         "par type","type de client","clientèle")),
      "customer_type_sales", 1.0),
 
     # ── Expiry ─────────────────────────────────────────────────────
-    (lambda q,e: _any(q,"expiring soon","expire soon","expiry alert","batches expiring",
-                         "expire bientôt","périme bientôt","alerte expiration"),
-     "expiry_soon", 1.0),
-    (lambda q,e: e.drug and _any(q,"when does","when do","expire","expiry date",
-                                    "expiration","quand expire","date d'expiration",
-                                    "date de péremption","péremption"),
-     "expiry_drug", 1.0),
-    (lambda q,e: _any(q,"expires first","first to expire","nearest expiry",
-                         "expire en premier","premier à expirer","expiration la plus proche"),
+    # first_expiry — word-cluster catches "expiring first", "which expires first",
+    # "nearest expiry", "soonest to expire" etc.
+    (lambda q,e: _concept(q,
+        ("first","nearest","soonest","closest","premier","plus proche","prochain"),
+        ("expir","expire","expiry","expiration","périm","péremption")),
      "first_expiry", 1.0),
-    (lambda q,e: e.month and _any(q,"expiring in","expire in","expires in","expiry in",
-                                     "expiration en","périme en"),
+
+    (lambda q,e: _concept(q,
+        ("expiring soon","expire soon","expiry alert","batches expiring","soon",
+         "expire bientôt","périme bientôt","alerte expiration","urgent expiry",
+         "about to expire","nearly expired")),
+     "expiry_soon", 1.0),
+
+    (lambda q,e: e.drug and _concept(q,
+        ("expire","expiry","expiration","when does","when do","quand expire",
+         "date d'expiration","péremption","batch","lot","when")),
+     "expiry_drug", 1.0),
+
+    (lambda q,e: e.month and _concept(q,
+        ("expiring","expire","expires","expiry","expiration","périme","expirant")),
      "expiry_month", 1.0),
-    (lambda q,e: e.drug and _any(q,"how many batches","batches does","number of batches",
-                                    "batch count","combien de lots","nombre de lots"),
+
+    (lambda q,e: e.drug and _concept(q,
+        ("how many batches","batches does","number of batches","batch count",
+         "combien de lots","nombre de lots","how many lots")),
      "batch_count_drug", 1.0),
-    (lambda q,e: _any(q,"how many batches","number of batches","batch count",
-                         "combien de lots","nombre de lots") and not e.drug,
+
+    (lambda q,e: not e.drug and _concept(q,
+        ("how many batches","number of batches","batch count",
+         "combien de lots","nombre de lots")),
      "batch_count_all", 1.0),
-    (lambda q,e: _any(q,"more than","at least","over","plus de","au moins") and
-                 _any(q,"batch","lot","lots","batches"),
+
+    (lambda q,e: _concept(q,
+        ("more than","at least","over","plus de","au moins"),
+        ("batch","lot","lots","batches")),
      "multi_batch", 1.0),
 
     # ── Suppliers ──────────────────────────────────────────────────
-    (lambda q,e: e.drug and _any(q,"who supplies","supplier for","who provides",
-                                    "fournisseur de","qui fournit","qui approvisionne",
-                                    "lead time for","délai pour"),
-     "supplier_drug", 1.0),
-    (lambda q,e: _any(q,"fastest supplier","fastest vendor","quickest supplier",
-                         "shortest lead time","fournisseur le plus rapide",
-                         "délai le plus court","livraison la plus rapide"),
+    # Fastest/slowest must come before generic supplier_drug
+    (lambda q,e: _concept(q,
+        ("fastest","quickest","shortest","rapide","plus rapide","plus court"),
+        ("supplier","vendor","fournisseur","lead","delivery","livraison","délai")),
      "fastest_supplier", 1.0),
-    (lambda q,e: _any(q,"slowest supplier","longest lead time","slowest vendor",
-                         "fournisseur le plus lent","délai le plus long"),
+
+    (lambda q,e: _concept(q,
+        ("slowest","longest","lent","plus lent","plus long"),
+        ("supplier","vendor","fournisseur","lead","delivery","livraison","délai")),
      "slowest_supplier", 1.0),
-    (lambda q,e: _any(q,"how many suppliers","number of suppliers",
-                         "combien de fournisseurs","nombre de fournisseurs"),
-     "supplier_count", 1.0),
-    (lambda q,e: e.city and _any(q,"suppliers in","vendors in","fournisseurs à",
-                                    "fournisseurs de","vendeurs à"),
-     "supplier_city", 1.0),
-    (lambda q,e: _any(q,"payment terms","best payment","credit terms","who gives best terms",
-                         "meilleures conditions de paiement","délai de paiement",
-                         "conditions de crédit"),
+
+    (lambda q,e: _concept(q,
+        ("payment terms","best payment","credit terms","meilleures conditions",
+         "délai de paiement","conditions de crédit","who gives best","terms")),
      "payment_terms", 1.0),
 
+    (lambda q,e: _concept(q,
+        ("how many suppliers","number of suppliers","combien de fournisseurs",
+         "nombre de fournisseurs","how many vendors")),
+     "supplier_count", 1.0),
+
+    (lambda q,e: e.city and _concept(q,
+        ("supplier","vendor","fournisseur","based in","in","à","de")),
+     "supplier_city", 1.0),
+
+    # Drug-specific supplier — drug present + supplier concept words
+    (lambda q,e: e.drug and _concept(q,
+        ("who supplies","supplier","provides","fournisseur","fournit","approvisionne",
+         "lead time","délai","source","where do we get","where do we order","order from",
+         "buy from","qui fournit","vendor","vendeur")),
+     "supplier_drug", 1.0),
+
     # ── Clinical ───────────────────────────────────────────────────
-    (lambda q,e: e.drug and _any(q,"interacts with","drug interactions","what interacts",
-                                    "interactions de","interactions avec","interagit avec"),
+    (lambda q,e: e.drug and _concept(q,
+        ("interacts","interaction","interactions","safe with","combined with",
+         "interagit","interaction","interactions")),
      "drug_interactions", 1.0),
-    (lambda q,e: e.drug and _any(q,"safe with","safe to take","can it be taken",
-                                    "sûr avec","peut-on prendre","compatible avec"),
+
+    (lambda q,e: e.drug and _concept(q,
+        ("safe with","safe to take","can it be taken","together","combine",
+         "sûr avec","peut-on prendre","compatible","take with","give with")),
      "drug_safety", 1.0),
-    (lambda q,e: e.drug and _any(q,"side effects","adverse effects","effets secondaires",
-                                    "effets indésirables"),
+
+    (lambda q,e: e.drug and _concept(q,
+        ("side effect","adverse effect","side effects","effets secondaires",
+         "effets indésirables","reaction","reactions","unwanted")),
      "side_effects", 1.0),
-    (lambda q,e: e.drug and _any(q,"dosage","dose","how much to give","posologie",
-                                    "dose recommandée","quelle dose"),
+
+    (lambda q,e: e.drug and _concept(q,
+        ("dosage","dose","how much to give","posologie","dose recommandée",
+         "quelle dose","how much","how many mg","milligrams","strength")),
      "dosage", 1.0),
-    (lambda q,e: e.drug and _any(q,"contraindicated","contraindications","contre-indiqué",
-                                    "contre-indications"),
+
+    (lambda q,e: e.drug and _concept(q,
+        ("contraindicated","contraindication","contre-indiqué","contre-indication",
+         "should not","cannot take","avoid","who should not")),
      "contraindications", 1.0),
     (lambda q,e: e.drug and _any(q,"what is","used for","what are","tell me about",
                                     "information on","à quoi sert","parle moi de",
@@ -673,11 +785,43 @@ def gpt_route(question: str, conversation_history: list = None) -> dict:
 # Python always runs the data queries. GPT never touches numbers.
 # ═══════════════════════════════════════════════════════════════════
 
+def exec_drug_price(e: Entities) -> str:
+    """Return price + cost info for a specific drug."""
+    if not e.drug:
+        return "\u274c Please specify a drug name."
+    df = pd.read_sql_query(
+        "SELECT generic_name, brand_name, formulation, strength,"
+        " selling_price_usd, cost_price_usd,"
+        " ROUND(((selling_price_usd-cost_price_usd)/NULLIF(selling_price_usd,0)*100)::numeric,1) AS margin_pct"
+        " FROM inventory WHERE LOWER(generic_name) LIKE %s OR LOWER(brand_name) LIKE %s LIMIT 1",
+        get_engine(), params=(f"%{e.drug.lower()}%", f"%{e.drug.lower()}%")
+    )
+    if df.empty:
+        return f"\u274c **{e.drug}** not found in inventory."
+    r = df.iloc[0]
+    name = r["generic_name"]
+    brand = r["brand_name"]
+    form = r["formulation"]
+    strength = r["strength"]
+    sell = r["selling_price_usd"]
+    cost = r["cost_price_usd"]
+    margin = r["margin_pct"]
+    return (
+        f"**{name}** ({brand}) — {form} {strength}\n\n"
+        "| Field | Value |\n|---|---|\n"
+        f"| Selling Price | **${sell}** |\n"
+        f"| Cost Price | ${cost} |\n"
+        f"| Gross Margin | {margin}% |\n"
+    )
+
+
 def exec_stock_check(e: Entities) -> str:
     return _exec_inventory({"filter": "all", "drug_name": e.drug, "limit": 5})
 
 def exec_low_stock(e: Entities) -> str:
-    return _exec_inventory({"filter": "below_reorder", "limit": 20})
+    # Respect explicit number: "show me the 2 drugs that need restocking"
+    limit = e.number if e.number != 10 else 20
+    return _exec_inventory({"filter": "below_reorder", "limit": limit})
 
 def exec_inventory_summary(e: Entities) -> str:
     df = pd.read_sql_query("""
@@ -698,6 +842,32 @@ def exec_inventory_summary(e: Entities) -> str:
         for _, r in df.iterrows()
     )
     return out
+
+def exec_category_count(e: Entities) -> str:
+    """Count drugs in a specific category."""
+    if not e.category:
+        return exec_inventory_summary(e)
+    df = pd.read_sql_query(
+        "SELECT COUNT(*) AS drug_count,"
+        " SUM(quantity_in_stock) AS total_units,"
+        " SUM(CASE WHEN quantity_in_stock <= reorder_level THEN 1 ELSE 0 END) AS low_count"
+        " FROM inventory WHERE category = %s",
+        get_engine(), params=(e.category,)
+    )
+    r = df.iloc[0]
+    cat = e.category
+    count = r["drug_count"]
+    units = r["total_units"]
+    low   = r["low_count"]
+    return (
+        f"**{cat}** — {count} drugs in stock\n\n"
+        "| Metric | Value |\n|---|---|\n"
+        f"| Total drugs | **{count}** |\n"
+        f"| Total units in stock | {units} |\n"
+        f"| Low stock / at reorder | {low} |\n\n"
+        f"*Ask \"show me all {cat}\" for the full list.*"
+    )
+
 
 def exec_category_browse(e: Entities) -> str:
     return _exec_inventory({"filter": "all", "category": e.category or "", "limit": 50})
@@ -856,8 +1026,10 @@ def exec_revenue_forecast(e: Entities) -> str:
 # ── Intent → executor map ──────────────────────────────────────────
 # NOTE: clinical and briefing executors need `lang` — handled in dispatch
 INTENT_EXECUTOR_MAP = {
+    "drug_price":           exec_drug_price,
     "stock_check":          exec_stock_check,
     "low_stock":            exec_low_stock,
+    "category_count":       exec_category_count,
     "inventory_summary":    exec_inventory_summary,
     "category_browse":      exec_category_browse,
     "cheapest_drugs":       exec_cheapest,
@@ -1509,6 +1681,48 @@ def get_greeting_response(question: str = "", lang: str = "en") -> str:
             "whatever you need. How can I help?")
 
 
+def _last_intent_context(history: list) -> dict:
+    """
+    Scan last assistant message to extract last intent + drug.
+    Used to resolve follow-up references like "what about X?" or "tell me more".
+    """
+    ctx = {"intent": "", "drug": ""}
+    if not history:
+        return ctx
+    for msg in reversed(history):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = str(msg.get("content", "")).lower()
+        # Detect intent from response content patterns
+        if "supplier for" in content or "lead time" in content:
+            ctx["intent"] = "supplier_drug"
+        elif "suppliers by lead time" in content and "fastest" in content:
+            ctx["intent"] = "fastest_supplier"
+        elif "suppliers by lead time" in content and "slowest" in content:
+            ctx["intent"] = "slowest_supplier"
+        elif "selling drugs" in content and "bottom" in content:
+            ctx["intent"] = "worst_sellers"
+        elif "selling drugs" in content and "top" in content:
+            ctx["intent"] = "top_sellers"
+        elif "batch" in content and "expir" in content:
+            ctx["intent"] = "expiry_drug"
+        elif "interaction" in content:
+            ctx["intent"] = "drug_interactions"
+        elif "reorder level" in content or "low stock" in content:
+            ctx["intent"] = "low_stock"
+        elif "selling price" in content or "cost price" in content:
+            ctx["intent"] = "drug_price"
+        elif "in stock" in content or "stock |" in content:
+            ctx["intent"] = "stock_check"
+        # Extract drug name
+        for drug in DRUG_NAMES:
+            if drug.lower() in content:
+                ctx["drug"] = drug
+                break
+        break
+    return ctx
+
+
 def dispatch(question: str, lang: str = "en",
              conversation_history: list = None) -> tuple[str, str]:
     """
@@ -1521,6 +1735,17 @@ def dispatch(question: str, lang: str = "en",
     q_lower  = corrected_q.lower().strip()
     q_clean  = re.sub(r"[?!.,'\u2019 ]+$", "", q_lower).strip()
     entities = extract_entities(q_lower)
+
+    # ── Follow-up context ───────────────────────────────────────────
+    last_ctx    = _last_intent_context(conversation_history or [])
+    is_followup = any(p in q_lower for p in [
+        "what about","and what","tell me more","more about","more details",
+        "what else","et pour","et à propos","plus sur","qu'en est-il",
+        "and the","and for","same for","how about",
+    ])
+    # Inherit drug from last turn when question is short and drug-less
+    if not entities.drug and last_ctx["drug"] and len(q_lower.split()) <= 5:
+        entities.drug = last_ctx["drug"]
 
     def _wrap(answer: str) -> str:
         if correction_note and "Clinical Disclaimer" not in answer:
@@ -1543,6 +1768,29 @@ def dispatch(question: str, lang: str = "en",
 
     # ── Layer 1: Deterministic routing ─────────────────────────────
     intent, conf = deterministic_route(q_lower, entities)
+
+    # ── Follow-up resolution: "what about X?" after known intent ───
+    if not intent and is_followup and entities.drug and last_ctx["intent"]:
+        followup_map = {
+            "supplier_drug":     "supplier_drug",
+            "fastest_supplier":  "supplier_drug",
+            "slowest_supplier":  "supplier_drug",
+            "stock_check":       "stock_check",
+            "expiry_drug":       "expiry_drug",
+            "drug_interactions": "drug_interactions",
+            "drug_price":        "drug_price",
+            "low_stock":         "stock_check",
+            "top_sellers":       "stock_check",
+            "worst_sellers":     "stock_check",
+        }
+        intent = followup_map.get(last_ctx["intent"])
+
+    # ── "Tell me more" with no new drug — repeat last clinical intent
+    if not intent and is_followup and not entities.drug and last_ctx["intent"] in {
+        "drug_interactions","drug_info","side_effects","dosage","contraindications"
+    }:
+        entities.drug = last_ctx["drug"]
+        intent = last_ctx["intent"]
 
     # ── Layer 3: GPT routing (if Layer 1 missed) ───────────────────
     if not intent:
@@ -1609,9 +1857,11 @@ def dispatch(question: str, lang: str = "en",
 def _gpt_inventory_intent(p: dict) -> str:
     f = p.get("filter","all"); s = p.get("sort_by","")
     if f == "below_reorder": return "low_stock"
-    if s == "margin_desc":   return "highest_margin"
+    if s in ("margin_desc","margin_asc"): return "highest_margin"
     if f == "cheapest":      return "cheapest_drugs"
     if f == "most_expensive": return "expensive_drugs"
+    if p.get("drug_name") and s in ("price_asc","price_desc"):
+        return "drug_price"
     if p.get("drug_name"):   return "stock_check"
     if p.get("category"):    return "category_browse"
     return "inventory_summary"
