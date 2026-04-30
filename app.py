@@ -1827,8 +1827,34 @@ def dispatch(question: str, lang: str = "en",
         entities.drug = _fuzzy_match_drug(drug, 78) or drug
         return _wrap(exec_drug_summary(entities)), "operational"
 
-    followup_markers = ["what about", "how about", "and ", "and what", "and for", "same for", "tell me more", "more about", "more details", "explain more", "explain further", "elaborate", "go on", "continue", "what else", "of these", "that list", "this", "that", "those", "them", "it", "et pour", "et à propos", "plus sur", "qu'en est-il"]
-    is_followup = any(p in q_lower for p in followup_markers) or q_lower.startswith("and ")
+    # Explicit clinical questions should always beat follow-up inheritance.
+    # Example: after an expiry answer, "What interacts with Metformin?" must not inherit expiry context.
+    if entities.drug and _concept(q_lower,
+        ("interacts", "interaction", "interactions", "interact with",
+         "safe with", "taken together", "combine", "combined with",
+         "interagit", "interaction", "interactions")):
+        return _wrap(exec_drug_interactions(entities, lang)), "clinical"
+
+    if entities.drug and _concept(q_lower,
+        ("side effect", "side effects", "adverse effect", "effets secondaires",
+         "dosage", "dose", "contraindication", "contraindicated",
+         "used for", "what is", "what is it for", "a quoi sert")):
+        if _concept(q_lower, ("side effect", "side effects", "adverse effect", "effets secondaires")):
+            return _wrap(exec_side_effects(entities, lang)), "clinical"
+        if _concept(q_lower, ("dosage", "dose", "posologie")):
+            return _wrap(exec_dosage(entities, lang)), "clinical"
+        if _concept(q_lower, ("contraindication", "contraindicated", "avoid", "contre-indique")):
+            return _wrap(exec_contraindications(entities, lang)), "clinical"
+        return _wrap(exec_drug_info(entities, lang)), "clinical"
+
+    strong_followup_markers = [
+        "what about", "how about", "and ", "and what", "and for", "same for",
+        "tell me more", "more about", "more details", "explain more",
+        "explain further", "elaborate", "go on", "continue", "what else",
+        "of these", "that list", "et pour", "et a propos", "plus sur", "qu'en est-il"
+    ]
+    pronoun_followup = bool(re.search(r"\b(this|that|those|them|it)\b", q_lower))
+    is_followup = any(marker in q_lower for marker in strong_followup_markers) or q_lower.startswith("and ") or pronoun_followup
 
     month_sales_phrases = ["sales for the month", "revenue for the month", "sales this month", "revenue this month", "monthly sales", "monthly revenue", "for the month", "month sales", "month revenue", "what were the sales for the month", "what was the revenue for the month", "ventes du mois", "revenu du mois"]
     if any(p in q_lower for p in month_sales_phrases):
