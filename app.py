@@ -93,6 +93,14 @@ MONTH_MAP = {
     "juillet":7,"août":8,"septembre":9,"octobre":10,"novembre":11,"décembre":12,
 }
 
+# ── Number words → integers ───────────────────────────────────────
+NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "un": 1, "une": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5,
+    "sept": 7, "huit": 8, "neuf": 9, "dix": 10,
+}
+
 # ── Category synonyms → canonical DB category ─────────────────────
 CATEGORY_MAP = {
     "antibiotic":"Antibiotics","antibiotique":"Antibiotics","antibiotics":"Antibiotics",
@@ -124,14 +132,14 @@ FAREWELL_RESPONSE = {
 }
 OUT_OF_SCOPE_RESPONSES = {
     "en": [
-        "I'm here to help with pharmacy operations — stock, sales, expiry, suppliers and clinical queries. Could you rephrase?",
-        "That's outside what I can help with. I focus on pharmacy data — inventory, transactions, drug information and supplier details.",
-        "I specialise in pharmacy operations. Anything pharmacy-related I can help with?",
+        "I’m focused on pharmacy operations — stock, sales, expiry, suppliers and medicines.",
+        "That’s outside my scope, but I can help with pharmacy data and decisions.",
+        "I specialize in pharmacy operations. Ask me about stock, sales or medicines.",
     ],
     "fr": [
-        "Je suis ici pour les opérations pharmaceutiques — stock, ventes, expiration, fournisseurs et clinique. Pouvez-vous reformuler?",
-        "Cela dépasse ce que je peux aider. Je me concentre sur les données pharmaceutiques.",
-        "Je me spécialise dans les opérations de pharmacie. Quelque chose de lié à la pharmacie?",
+        "Je suis spécialisé dans les opérations pharmaceutiques.",
+        "Cela dépasse mon domaine — je peux aider avec le stock et les ventes.",
+        "Posez-moi des questions liées à la pharmacie.",
     ],
 }
 CLINICAL_DISCLAIMER = {
@@ -273,9 +281,15 @@ def extract_entities(question: str) -> Entities:
     # Keywords (non-skip, length ≥ 4)
     e.keywords = [w for w in words if len(w) >= 4 and w not in SKIP_WORDS and not w.isdigit()]
 
-    # Number
+    # Number: supports both digits ("2") and words ("two")
     nums = re.findall(r"\b\d+\b", q)
-    if nums: e.number = int(nums[0])
+    if nums:
+        e.number = int(nums[0])
+    else:
+        for w in words:
+            if w in NUMBER_WORDS:
+                e.number = NUMBER_WORDS[w]
+                break
 
     # Day
     for w in words:
@@ -404,6 +418,13 @@ DETERMINISTIC_RULES = [
         ("restock","restocking","reorder","order","urgent","needs","need","critical"),
         ("drug","drugs","médicament","médicaments","item","items")),
      "low_stock", 1.0),
+
+    # Time-based expiry risk: keep separate from low-stock risk.
+    (lambda q,e: _concept(q,
+        ("running out soon","expiring soon","about to expire","nearly expired",
+         "expiring","expiry soon","expire soon","périme bientôt",
+         "expire bientôt","near expiry","nearing expiry")),
+     "expiry_soon", 1.0),
 
     (lambda q,e: _concept(q,
         ("running low","below reorder","low on stock","low stock","critical stock",
@@ -850,8 +871,8 @@ def exec_stock_check(e: Entities) -> str:
     return _exec_inventory({"filter": "all", "drug_name": e.drug, "limit": 5})
 
 def exec_low_stock(e: Entities) -> str:
-    # Respect explicit number: "show me the 2 drugs that need restocking"
-    limit = e.number if e.number != 10 else 20
+    # Respect explicit number words/digits immediately; default to 10.
+    limit = e.number
     return _exec_inventory({"filter": "below_reorder", "limit": limit})
 
 def exec_inventory_summary(e: Entities) -> str:
@@ -988,7 +1009,7 @@ def exec_customer_type(e: Entities) -> str:     return _exec_sales({"period":"cu
 
 # ── Expiry executors ───────────────────────────────────────────────
 def exec_expiry_soon(e: Entities) -> str:
-    return _exec_expiry({"within_days": 90, "limit": 20})
+    return "⏳ **Drugs expiring soon (time-based risk):**\n\n" + _exec_expiry({"within_days": 90, "limit": 20})
 def exec_expiry_drug(e: Entities) -> str:
     return _exec_expiry({"drug_name": e.drug})
 def exec_first_expiry(e: Entities) -> str:
@@ -1128,7 +1149,7 @@ def _exec_inventory(params: dict) -> str:
     order  = sort_map.get(sort_by, "generic_name ASC")
     where, sql_params = [], []
 
-    if filt == "below_reorder": where.append("quantity_in_stock <= reorder_level"); order = "stock_pct ASC"
+    if filt == "below_reorder": where.append("quantity_in_stock <= reorder_level"); order = "(quantity_in_stock::numeric / NULLIF(reorder_level,1)) ASC"
     elif filt == "cheapest":    order = "selling_price_usd ASC"
     elif filt == "most_expensive": order = "selling_price_usd DESC"
 
@@ -1272,7 +1293,7 @@ def _sales_current_month() -> str:
         " FROM transactions WHERE date::date>=DATE_TRUNC('month',CURRENT_DATE)"
         " GROUP BY date::date ORDER BY date::date DESC", get_engine())
     r = df_t.iloc[0]
-    month = str(r["month_label"]).strip() if r["month_label"] else "This month"
+    month = " ".join(str(r["month_label"]).split()) if r["month_label"] else "This month"
     if not r["total_revenue"]: return f"No transactions recorded for {month} yet."
     out  = f"**{month} Revenue**\n\nTotal: **${r['total_revenue']:,.2f}** | Transactions: **{r['transactions']}** | Units: **{r['total_units']}**\n\n"
     if not df_d.empty:
@@ -1392,7 +1413,7 @@ def _exec_expiry(params: dict) -> str:
             out += "| Drug | Brand | Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|---|---|\n"
             for _, r in df.iterrows():
                 d = r["days"]
-                flag = "🚨 URGENT" if d<30 else ("⚠️ Warning" if d<90 else "📅 Monitor")
+                flag = "🚨 CRITICAL" if d <= 30 else ("⚠️ Warning" if d <= 90 else "📅 Monitor")
                 out += f"| {r['generic_name']} | {r['brand_name']} | {r['batch_number']} | {str(r['expiry_date'])[:10]} | **{d}** | {r['quantity_remaining']} | {flag} |\n"
             return out
 
@@ -1421,7 +1442,7 @@ def _exec_expiry(params: dict) -> str:
         if df.empty: return f"❌ No batch records found for {drug_name}."
         out  = f"**{drug_name} — {len(df)} batch(es):**\n\n| Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|\n"
         for _, r in df.iterrows():
-            d = r["days"]; flag = "🚨 URGENT" if d<30 else ("⚠️ Warning" if d<90 else "✅ OK")
+            d = r["days"]; flag = "🚨 CRITICAL" if d <= 30 else ("⚠️ Warning" if d <= 90 else "✅ OK")
             out += f"| {r['batch_number']} | {str(r['expiry_date'])[:10]} | **{d}** | {r['quantity_remaining']} | {flag} |\n"
         return out
 
@@ -1434,7 +1455,7 @@ def _exec_expiry(params: dict) -> str:
     if df.empty: return f"✅ No batches expiring within {within_days} days."
     if top_only:
         r = df.iloc[0]; d = r["days_remaining"]
-        flag = "🚨 URGENT" if d<30 else ("⚠️ Warning" if d<90 else "📅 Monitor")
+        flag = "🚨 CRITICAL" if d <= 30 else ("⚠️ Warning" if d <= 90 else "📅 Monitor")
         return (
             f"**First to expire:** {r['generic_name']} ({r['brand_name']})\n\n"
             "| Field | Value |\n|---|---|\n"
@@ -1446,7 +1467,7 @@ def _exec_expiry(params: dict) -> str:
     out  = f"**Batches expiring within {within_days} days** — {len(df)} found:\n\n"
     out += "| Drug | Brand | Batch | Expiry | Days Left | Qty | Status |\n|---|---|---|---|---|---|---|\n"
     for _, r in df.iterrows():
-        d = r["days_remaining"]; flag = "🚨 URGENT" if d<30 else ("⚠️ Warning" if d<90 else "📅 Monitor")
+        d = r["days_remaining"]; flag = "🚨 CRITICAL" if d <= 30 else ("⚠️ Warning" if d <= 90 else "📅 Monitor")
         out += f"| {r['generic_name']} | {r['brand_name']} | {r['batch_number']} | {str(r['expiry_date'])[:10]} | **{d}** | {r['quantity_remaining']} | {flag} |\n"
     return out
 
@@ -1834,7 +1855,9 @@ def dispatch(question: str, lang: str = "en",
         if last_ctx.get("drug"):
             entities.drug = last_ctx["drug"]
             if last_ctx["intent"] in {"drug_interactions", "drug_safety"}:
-                return _wrap(exec_drug_interactions(entities, lang)), "clinical"
+                base = exec_drug_interactions(entities, lang)
+                extra = exec_drug_info(entities, lang)
+                return _wrap(base + "\n\n---\n**More details:**\n\n" + extra), "clinical"
             return _wrap(exec_drug_info(entities, lang)), "clinical"
 
     intent, conf = deterministic_route(q_lower, entities)
