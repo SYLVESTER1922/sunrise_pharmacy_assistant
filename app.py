@@ -294,12 +294,26 @@ def extract_entities(question: str) -> Entities:
                  "chinhoyi","bindura","marondera","chitungwiza"]:
         if city in q: e.city = city.title(); break
 
-    # Drug — try each keyword, take first match
+    # Drug — try each keyword, take first match.
+    # Important: never let days/months/follow-up filler words become fuzzy drug matches
+    # (e.g. "Thursday" should not become a medicine during "What about Thursday?").
+    non_drug_terms = set(DAY_MAP.keys()) | set(MONTH_MAP.keys()) | {
+        "this", "that", "these", "those", "them", "more", "about", "same",
+        "again", "further", "details", "detail", "explain", "elaborate",
+        "sales", "revenue", "month", "monthly", "today", "yesterday", "tomorrow",
+        "stock", "supplier", "vendor", "batch", "expiry", "expire", "expiring",
+    }
     for kw in e.keywords:
+        if kw in non_drug_terms:
+            continue
         # Strip possessive trailing s
         kw_clean = kw[:-1] if kw.endswith("s") and _fuzzy_match_drug(kw[:-1], 90) else kw
+        if kw_clean in non_drug_terms:
+            continue
         m = _fuzzy_match_drug(kw_clean, threshold=82)
-        if m: e.drug = m; break
+        if m:
+            e.drug = m
+            break
 
     return e
 
@@ -1698,189 +1712,166 @@ def get_greeting_response(question: str = "", lang: str = "en") -> str:
             "whatever you need. How can I help?")
 
 
+def _safe_text(value) -> str:
+    """Normalize any Gradio/OpenAI-style content into plain text."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        return " ".join(parts)
+    return str(value)
+
+
 def _last_intent_context(history: list) -> dict:
-    """
-    Scan last assistant message to extract last intent + drug.
-    Patterns are ordered most-specific first to avoid false matches.
-    e.g. a supplier card contains "Lead Time" and "In Stock" —
-    supplier patterns must be checked before stock patterns.
-    """
-    ctx = {"intent": "", "drug": ""}
+    """Infer previous conversational context for follow-ups."""
+    ctx = {"intent": None, "drug": None, "day": None, "mode": None}
     if not history:
         return ctx
-    for msg in reversed(history):
+    recent = history[-10:]
+    for msg in reversed(recent):
+        if not isinstance(msg, dict):
+            continue
+        content = _safe_text(msg.get("content", ""))
+        q = content.lower()
+        ent = extract_entities(content)
+        if ent.drug and not ctx["drug"]:
+            ctx["drug"] = ent.drug
+        if ent.day and not ctx["day"]:
+            ctx["day"] = ent.day
+        if msg.get("role") == "user":
+            if any(w in q for w in ["interact", "interaction", "safe with", "taken together", "combine", "combined"]):
+                ctx["intent"] = "drug_interactions"; ctx["mode"] = "clinical"; return ctx
+            if any(w in q for w in ["side effect", "adverse", "dosage", "dose", "contraindication", "used for", "what is"]):
+                if ent.drug:
+                    ctx["intent"] = "drug_info"; ctx["mode"] = "clinical"; return ctx
+            if any(w in q for w in ["sales", "revenue", "sold", "selling", "seller", "sellers"]):
+                ctx["intent"] = "day_sales" if ent.day else ("this_month_sales" if "month" in q else "total_summary")
+                ctx["mode"] = "operational"; return ctx
+            if ent.day:
+                ctx["intent"] = "day_sales"; ctx["mode"] = "operational"; return ctx
+            if any(w in q for w in ["supplier", "vendor", "supplies", "lead time", "buy from", "order from"]):
+                ctx["intent"] = "supplier_drug" if ent.drug else "supplier_count"; ctx["mode"] = "operational"; return ctx
+            if any(w in q for w in ["expire", "expiry", "batch", "batches"]):
+                ctx["intent"] = "expiry_drug" if ent.drug else "expiry_soon"; ctx["mode"] = "operational"; return ctx
+            if any(w in q for w in ["stock", "available", "do we have", "inventory", "left"]):
+                ctx["intent"] = "stock_check"; ctx["mode"] = "operational"; return ctx
+    for msg in reversed(recent):
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        content = str(msg.get("content", "")).lower()
-
-        # ── Most-specific patterns first ────────────────────────────
-        # Supplier card: has both "supplier" label AND "payment terms" row
-        if "payment terms" in content and "lead time" in content:
-            ctx["intent"] = "supplier_drug"
-        # Supplier lead-time ranking table
-        elif "suppliers by lead time" in content:
-            ctx["intent"] = "fastest_supplier" if "fastest" in content else "slowest_supplier"
-        # Supplier city listing
-        elif "suppliers**" in content and "city" in content and "count" in content:
-            ctx["intent"] = "supplier_count"
-        # Sales rankings
-        elif "selling drugs" in content and "bottom" in content:
-            ctx["intent"] = "worst_sellers"
-        elif "selling drugs" in content and "top" in content:
-            ctx["intent"] = "top_sellers"
-        # Expiry
-        elif "first to expire" in content:
-            ctx["intent"] = "first_expiry"
-        elif "batch" in content and "expir" in content and "days left" in content:
-            ctx["intent"] = "expiry_drug"
-        elif "batches expiring" in content or "expiry" in content:
-            ctx["intent"] = "expiry_soon"
-        # Clinical
-        elif "interaction" in content and "severity" in content:
-            ctx["intent"] = "drug_interactions"
-        elif "side effect" in content or "adverse effect" in content:
-            ctx["intent"] = "side_effects"
-        elif "indication" in content or "used for" in content:
-            ctx["intent"] = "drug_info"
-        # Operational
-        elif "reorder level" in content and "⚠️" in content:
-            ctx["intent"] = "low_stock"
-        elif "procurement action" in content:
-            ctx["intent"] = "reorder_list"
-        elif "selling price" in content and "cost price" in content and "margin" in content:
-            ctx["intent"] = "drug_price"
-        # Stock check — only if none of the above matched
-        # (supplier cards also contain "in stock" so check this last)
-        elif ("in stock" in content or "reorder level" in content) and "payment terms" not in content:
-            ctx["intent"] = "stock_check"
-
-        # Extract drug name from content
+        content = _safe_text(msg.get("content", ""))
+        q = content.lower()
         for drug in DRUG_NAMES:
-            if drug.lower() in content:
-                ctx["drug"] = drug
-                break
-        break
+            if drug.lower() in q:
+                ctx["drug"] = drug; break
+        for d in DAY_MAP:
+            if d in q:
+                ctx["day"] = DAY_MAP[d]; break
+        if "clinical data" in q or "drug interaction" in q or "interacts with" in q or "severity" in q:
+            ctx["intent"] = "drug_interactions"; ctx["mode"] = "clinical"; return ctx
+        if "sales summary" in q or "selling drugs" in q or "revenue" in q:
+            ctx["intent"] = "day_sales" if ctx["day"] else "total_summary"; ctx["mode"] = "operational"; return ctx
+        if "supplier" in q or "payment terms" in q or "lead time" in q:
+            ctx["intent"] = "supplier_drug"; ctx["mode"] = "operational"; return ctx
+        if "expiry" in q or "batch" in q or "first to expire" in q:
+            ctx["intent"] = "expiry_drug" if ctx["drug"] else "expiry_soon"; ctx["mode"] = "operational"; return ctx
+        if "stock" in q or "reorder level" in q:
+            ctx["intent"] = "stock_check"; ctx["mode"] = "operational"; return ctx
     return ctx
-
-
 def dispatch(question: str, lang: str = "en",
              conversation_history: list = None) -> tuple[str, str]:
-    """
-    Master dispatcher — runs all 5 layers.
-    Returns (answer: str, mode: str)
-    mode ∈ {"system", "operational", "clinical", "caution"}
-    """
-    # ── Pre-process ─────────────────────────────────────────────────
+    """Master dispatcher with follow-up memory and safe fallback."""
     corrected_q, correction_note = fuzzy_correct_question(question)
     q_lower  = corrected_q.lower().strip()
     q_clean  = re.sub(r"[?!.,'\u2019 ]+$", "", q_lower).strip()
     entities = extract_entities(q_lower)
-
-    # ── Follow-up context ───────────────────────────────────────────
-    last_ctx    = _last_intent_context(conversation_history or [])
-    is_followup = any(p in q_lower for p in [
-        "what about","and what","tell me more","more about","more details",
-        "what else","et pour","et à propos","plus sur","qu'en est-il",
-        "and the","and for","same for","how about",
-    ])
-    # Inherit drug from last turn when question is short and drug-less
-    if not entities.drug and last_ctx["drug"] and len(q_lower.split()) <= 5:
-        entities.drug = last_ctx["drug"]
+    last_ctx = _last_intent_context(conversation_history or [])
 
     def _wrap(answer: str) -> str:
-        if correction_note and "Clinical Disclaimer" not in answer:
-            return f"{correction_note}\n\n{answer}"
         return f"{correction_note}\n\n{answer}" if correction_note else answer
 
-    # ── System responses (fastest path) ────────────────────────────
-    if any(q_clean == t or q_clean.startswith(t+" ") for t in GREETING_TRIGGERS):
+    if any(q_clean == t or q_clean.startswith(t + " ") for t in GREETING_TRIGGERS):
         return get_greeting_response(question, lang), "system"
-    if any(q_clean == t or q_clean.startswith(t+" ") for t in THANKS_TRIGGERS):
+    if any(q_clean == t or q_clean.startswith(t + " ") for t in THANKS_TRIGGERS):
         return THANKS_RESPONSE[lang], "system"
-    if any(q_clean == t or q_clean.startswith(t+" ") for t in FAREWELL_TRIGGERS):
+    if any(q_clean == t or q_clean.startswith(t + " ") for t in FAREWELL_TRIGGERS):
         return FAREWELL_RESPONSE[lang], "system"
 
-    # ── Drug summary shortcut ───────────────────────────────────────
     if q_lower.startswith("quick summary:") or q_lower.startswith("résumé rapide:"):
         drug = re.sub(r"^(quick summary:|résumé rapide:)\s*", "", corrected_q, flags=re.I).strip()
-        entities.drug = drug
+        entities.drug = _fuzzy_match_drug(drug, 78) or drug
         return _wrap(exec_drug_summary(entities)), "operational"
 
-    # ── Layer 1: Deterministic routing ─────────────────────────────
+    followup_markers = ["what about", "how about", "and ", "and what", "and for", "same for", "tell me more", "more about", "more details", "explain more", "explain further", "elaborate", "go on", "continue", "what else", "of these", "that list", "this", "that", "those", "them", "it", "et pour", "et à propos", "plus sur", "qu'en est-il"]
+    is_followup = any(p in q_lower for p in followup_markers) or q_lower.startswith("and ")
+
+    month_sales_phrases = ["sales for the month", "revenue for the month", "sales this month", "revenue this month", "monthly sales", "monthly revenue", "for the month", "month sales", "month revenue", "what were the sales for the month", "what was the revenue for the month", "ventes du mois", "revenu du mois"]
+    if any(p in q_lower for p in month_sales_phrases):
+        return _wrap(exec_this_month(entities)), "operational"
+
+    sales_contexts = {"day_sales", "total_summary", "top_sellers", "worst_sellers", "yesterday_sales", "this_month_sales"}
+    if is_followup and entities.day and last_ctx.get("intent") in sales_contexts:
+        return _wrap(exec_day_sales(entities)), "operational"
+
+    if is_followup and entities.drug and last_ctx.get("intent"):
+        previous = last_ctx.get("intent")
+        if previous in {"stock_check", "low_stock", "drug_summary", "drug_price"}:
+            return _wrap(exec_drug_summary(entities)), "operational"
+        if previous in {"supplier_drug", "fastest_supplier", "slowest_supplier", "supplier_city", "supplier_count"}:
+            return _wrap(exec_supplier_drug(entities)), "operational"
+        if previous in {"expiry_drug", "expiry_soon", "first_expiry", "batch_count_drug", "batch_count_all"}:
+            return _wrap(exec_expiry_drug(entities)), "operational"
+        if previous in {"drug_interactions", "drug_safety"}:
+            return _wrap(exec_drug_interactions(entities, lang)), "clinical"
+        if previous in {"drug_info", "side_effects", "dosage", "contraindications"}:
+            return _wrap(exec_drug_info(entities, lang)), "clinical"
+
+    if is_followup and not entities.drug and last_ctx.get("intent") in {"drug_interactions", "drug_safety", "drug_info", "side_effects", "dosage", "contraindications"}:
+        if last_ctx.get("drug"):
+            entities.drug = last_ctx["drug"]
+            if last_ctx["intent"] in {"drug_interactions", "drug_safety"}:
+                return _wrap(exec_drug_interactions(entities, lang)), "clinical"
+            return _wrap(exec_drug_info(entities, lang)), "clinical"
+
     intent, conf = deterministic_route(q_lower, entities)
+    if not intent and entities.day and last_ctx.get("intent") in sales_contexts:
+        return _wrap(exec_day_sales(entities)), "operational"
 
-    # ── Follow-up resolution: "what about X?" after known intent ───
-    if not intent and is_followup and entities.drug and last_ctx["intent"]:
-        followup_map = {
-            "supplier_drug":     "supplier_drug",
-            "fastest_supplier":  "supplier_drug",
-            "slowest_supplier":  "supplier_drug",
-            "stock_check":       "stock_check",
-            "expiry_drug":       "expiry_drug",
-            "drug_interactions": "drug_interactions",
-            "drug_price":        "drug_price",
-            "low_stock":         "stock_check",
-            "top_sellers":       "stock_check",
-            "worst_sellers":     "stock_check",
-        }
-        intent = followup_map.get(last_ctx["intent"])
-
-    # ── "Tell me more" with no new drug — repeat last clinical intent
-    if not intent and is_followup and not entities.drug and last_ctx["intent"] in {
-        "drug_interactions","drug_info","side_effects","dosage","contraindications"
-    }:
-        entities.drug = last_ctx["drug"]
-        intent = last_ctx["intent"]
-
-    # ── Layer 3: GPT routing (if Layer 1 missed) ───────────────────
     if not intent:
         gpt_result = gpt_route(corrected_q, conversation_history)
-        gpt_intent = gpt_result["intent"]
-        gpt_params = gpt_result["params"]
-
+        gpt_intent = gpt_result.get("intent")
+        gpt_params = gpt_result.get("params", {}) or {}
         if gpt_intent == "out_of_scope":
             return _out_of_scope(lang), "system"
-
-        # Map GPT tool names to our internal intent IDs
         GPT_TOOL_TO_INTENT = {
-            "query_inventory":  _gpt_inventory_intent(gpt_params),
-            "query_sales":      _gpt_sales_intent(gpt_params),
-            "query_expiry":     _gpt_expiry_intent(gpt_params),
-            "query_supplier":   _gpt_supplier_intent(gpt_params),
-            "query_clinical":   _gpt_clinical_intent(gpt_params),
-            "query_briefing":   "daily_briefing",
-            "query_combined_risk": "combined_risk",
-            "query_reorder":    "reorder_list",
-            "query_forecast":   "revenue_forecast",
-            "query_reconciliation": "stock_reconciliation",
-            "query_alternatives": "drug_alternatives",
-            "query_stats":      "inventory_summary",
+            "query_inventory": _gpt_inventory_intent(gpt_params), "query_sales": _gpt_sales_intent(gpt_params),
+            "query_expiry": _gpt_expiry_intent(gpt_params), "query_supplier": _gpt_supplier_intent(gpt_params),
+            "query_clinical": _gpt_clinical_intent(gpt_params), "query_briefing": "daily_briefing",
+            "query_combined_risk": "combined_risk", "query_reorder": "reorder_list",
+            "query_forecast": "revenue_forecast", "query_reconciliation": "stock_reconciliation",
+            "query_alternatives": "drug_alternatives", "query_stats": "inventory_summary",
         }
         intent = GPT_TOOL_TO_INTENT.get(gpt_intent)
-
-        # Merge GPT-extracted entities into our entities object
         if gpt_params.get("drug_name") and not entities.drug:
-            entities.drug = gpt_params["drug_name"]
+            entities.drug = _fuzzy_match_drug(gpt_params["drug_name"], 78) or gpt_params["drug_name"]
         if gpt_params.get("limit"):
             entities.number = gpt_params["limit"]
         if gpt_params.get("day_name") and not entities.day:
-            entities.day = gpt_params["day_name"].lower()
+            entities.day = str(gpt_params["day_name"]).lower()
         if gpt_params.get("month_name") and not entities.month:
-            entities.month = gpt_params["month_name"].lower()
+            entities.month = str(gpt_params["month_name"]).lower()
         if gpt_params.get("city") and not entities.city:
             entities.city = gpt_params["city"]
-
         if not intent:
-            caution = ("⚠️ **Proceed with caution** — I'm not fully sure about this query.\n\n"
-                       if lang == "en" else
-                       "⚠️ **Procéder avec prudence** — Je ne suis pas sûr de cette requête.\n\n")
-            return caution + _out_of_scope(lang), "caution"
+            return _out_of_scope(lang), "system"
 
-    # ── Layer 4: Execute ────────────────────────────────────────────
     executor = INTENT_EXECUTOR_MAP.get(intent)
     if not executor:
         return _out_of_scope(lang), "system"
-
     try:
         if intent in LANG_INTENTS:
             answer = executor(entities, lang)
@@ -1889,9 +1880,8 @@ def dispatch(question: str, lang: str = "en",
         mode = "clinical" if intent in CLINICAL_INTENTS else "operational"
         return _wrap(answer), mode
     except Exception as ex:
-        return (f"⚠️ Something went wrong. Please try rephrasing.\n\n*Details: {ex}*",
-                "caution")
-
+        print(f"Dispatch execution error for intent={intent}: {ex}")
+        return "⚠️ I couldn’t complete that request. Please rephrase it or mention the medicine/topic more clearly.", "caution"
 
 # ── GPT param → intent ID helpers ─────────────────────────────────
 def _gpt_inventory_intent(p: dict) -> str:
