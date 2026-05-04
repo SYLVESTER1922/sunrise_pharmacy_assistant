@@ -2149,6 +2149,26 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-thumb { background: #c9a84c; border-radius: 4px; }
         footer { display: none !important; }
+
+        /* Sidebar text — force visible on dark background */
+        .gradio-container label, .gradio-container .label-wrap span,
+        .gradio-container p, .gradio-container li,
+        .gradio-container .prose p, .gradio-container .prose li,
+        .gradio-container h3, .gradio-container h4,
+        .gradio-container .markdown-body p,
+        .gradio-container .markdown-body li,
+        .gradio-container .markdown-body h3 { color: #c8d8f0 !important; }
+        .gradio-container h3 { color: #7dd4fc !important; font-size: 13px !important; }
+        .gradio-container .wrap label { color: #a8c8f0 !important; }
+        .gradio-container .prose strong { color: #c9a84c !important; }
+        /* Input boxes */
+        .gradio-container input, .gradio-container textarea, .gradio-container select {
+            background: #0a1628 !important; color: #c8d8f0 !important;
+            border: 1px solid #1a3a6e !important; border-radius: 8px !important;
+        }
+        /* Buttons secondary */
+        button.secondary { background: #0a1e40 !important; color: #7aa4d4 !important;
+            border: 1px solid #1a3a6e !important; border-radius: 8px !important; }
     </style>
     """)
 
