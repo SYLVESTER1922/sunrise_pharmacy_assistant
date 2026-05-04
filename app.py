@@ -2108,6 +2108,50 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     });
     </script>""")
 
+    # ── Runtime CSS — same bubble style as Simbisa QSR chatbot ──────
+    gr.HTML("""
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap');
+
+        body, .gradio-container { background: #050d1a !important; font-family: 'Lato', sans-serif !important; }
+
+        /* User bubbles — dark navy, light blue text */
+        .message.user > div, div[class*="message"][class*="user"] > div:last-child {
+            background: linear-gradient(135deg, #0d2147, #162d5a) !important;
+            color: #e8f0ff !important;
+            border-radius: 18px 18px 4px 18px !important;
+            border: 1px solid #2a4a8a !important;
+            padding: 12px 16px !important;
+            font-size: 14px !important;
+            line-height: 1.6 !important;
+            box-shadow: 0 2px 8px rgba(13,33,71,0.4) !important;
+        }
+        /* Bot bubbles — navy blue, white text */
+        .message.bot > div, div[class*="message"][class*="bot"] > div:last-child {
+            background: linear-gradient(135deg, #0a1e3d, #112952) !important;
+            color: #ffffff !important;
+            border-radius: 18px 18px 18px 4px !important;
+            border: 1px solid #2a6aa055 !important;
+            padding: 14px 18px !important;
+            font-size: 14px !important;
+            line-height: 1.7 !important;
+            box-shadow: 0 2px 12px rgba(10,30,61,0.4) !important;
+        }
+        .message.user > div *, div[class*="message"][class*="user"] * { color: #e8f0ff !important; }
+        .message.bot > div *, div[class*="message"][class*="bot"] * { color: #ffffff !important; }
+        .message.bot > div strong, div[class*="message"][class*="bot"] strong { color: #7dd4fc !important; font-weight: 700 !important; }
+        .message.bot > div h1, .message.bot > div h2, .message.bot > div h3,
+        div[class*="message"][class*="bot"] h1, div[class*="message"][class*="bot"] h2 {
+            color: #7dd4fc !important; font-size: 13px !important; font-weight: 700 !important;
+            border-bottom: 1px solid #2a4a8a55 !important; padding-bottom: 4px !important;
+        }
+        div[class*="chatbot"], .chatbot { background: #040c1a !important; border-radius: 16px !important; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #c9a84c; border-radius: 4px; }
+        footer { display: none !important; }
+    </style>
+    """)
+
     gr.HTML("""
     <div style="background:linear-gradient(135deg,#0d1b2a,#1a3a5c);
                 padding:16px 24px;border-radius:10px;margin-bottom:16px;
@@ -2295,4 +2339,4 @@ with gr.Blocks(title="Netrisyl Pharmacy Assistant") as demo:
     brief_btn.click(do_brief, [chatbot, lang_state], [brief_box])
 
 
-demo.launch()
+demo.launch(server_name="0.0.0.0", server_port=7860)
