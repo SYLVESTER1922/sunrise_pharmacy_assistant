@@ -2104,6 +2104,14 @@ select {
 label {
     color: #f0f0f0 !important;
 }
+ul[role="listbox"] li {
+    color: #111111 !important;
+    font-weight: 500 !important;
+}
+ul[role="listbox"] li:hover {
+    background-color: #4a90d9 !important;
+    color: #ffffff !important;
+}
 """
 
 css = """
