@@ -2094,49 +2094,20 @@ def export_chat(chat_history: list):
 # ═══════════════════════════════════════════════════════════════════
 
 css = """
-.dropdown-container select,
-select {
-    color: #ffffff !important;
-    background-color: #1a1a2e !important;
-    border: 1px solid #4a90d9 !important;
-}
-.dropdown-container label,
-label {
-    color: #f0f0f0 !important;
+/* Dropdown list — dark navy with gold accent (JCC theme) */
+ul[role="listbox"] {
+    background-color: #0d1b2a !important;
+    border: 1px solid #c9a84c !important;
 }
 ul[role="listbox"] li {
-    color: #111111 !important;
+    color: #ffffff !important;
     font-weight: 500 !important;
+    background-color: #0d1b2a !important;
 }
-ul[role="listbox"] li:hover {
-    background-color: #4a90d9 !important;
-    color: #ffffff !important;
-}
-"""
-
-css = """
-.dropdown-container select,
-select {
-    color: #ffffff !important;
-    background-color: #1a1a2e !important;
-    border: 1px solid #4a90d9 !important;
-}
-.dropdown-container label,
-label {
-    color: #f0f0f0 !important;
-}
-"""
-
-css = """
-.dropdown-container select,
-select {
-    color: #ffffff !important;
-    background-color: #1a1a2e !important;
-    border: 1px solid #4a90d9 !important;
-}
-.dropdown-container label,
-label {
-    color: #f0f0f0 !important;
+ul[role="listbox"] li:hover,
+ul[role="listbox"] li[aria-selected="true"] {
+    background-color: #c9a84c !important;
+    color: #0d1b2a !important;
 }
 """
 
